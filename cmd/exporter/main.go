@@ -42,6 +42,7 @@ func run(logger *slog.Logger) error {
 	configPath := flag.String("config", "/etc/cloudflare-exporter/config.yaml", "path to the exporter config file")
 	analyticsWindow := flag.Duration("analytics-window", time.Minute, "trailing time range of HTTP analytics summed per scrape")
 	analyticsLag := flag.Duration("analytics-lag", 5*time.Minute, "how far behind now the analytics window ends, to allow for Cloudflare ingestion delay")
+	zoneAnalyticsLag := flag.Duration("zone-analytics-lag", 0, "-analytics-lag for the httpRequests1mGroups (zone_*) metrics, which Cloudflare finalises later than the adaptive datasets; 0 means the same as -analytics-lag")
 	analyticsTimestamps := flag.Bool("analytics-timestamps", false, "stamp analytics samples with the window start so each minute is stored once; needs a scrape interval of at most 1m")
 	queryLimit := flag.Int("query-limit", 10000, "max GraphQL result rows requested per zone")
 	showVersion := flag.Bool("version", false, "print the exporter version and exit")
@@ -61,6 +62,9 @@ func run(logger *slog.Logger) error {
 	if *analyticsLag < 0 {
 		return errors.New("-analytics-lag must not be negative")
 	}
+	if *zoneAnalyticsLag < 0 {
+		return errors.New("-zone-analytics-lag must not be negative")
+	}
 	if *queryLimit <= 0 {
 		return errors.New("-query-limit must be positive")
 	}
@@ -75,6 +79,7 @@ func run(logger *slog.Logger) error {
 		Window:             *analyticsWindow,
 		Lag:                *analyticsLag,
 		QueryLimit:         *queryLimit,
+		ZoneLag:            *zoneAnalyticsLag,
 		Timestamps:         *analyticsTimestamps,
 		ScrapeTimeout:      cfg.Server.ScrapeTimeout,
 		AccountConcurrency: cfg.Server.AccountConcurrency,

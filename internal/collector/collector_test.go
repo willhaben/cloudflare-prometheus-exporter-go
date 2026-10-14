@@ -1310,10 +1310,17 @@ func TestCollector_TimestampsOnlyOnAnalyticsWhenEnabled(t *testing.T) {
 	}
 }
 
-// windowSpy records the window handed to FetchErrorMetrics.
+// windowSpy records the windows handed to FetchErrorMetrics (min, max) and
+// FetchHTTPMetrics (zoneMin, zoneMax).
 type windowSpy struct {
 	*fakeClient
-	min, max time.Time
+	min, max         time.Time
+	zoneMin, zoneMax time.Time
+}
+
+func (w *windowSpy) FetchHTTPMetrics(ctx context.Context, zoneIDs []string, mintime, maxtime time.Time, limit int) ([]cloudflareapi.ZoneHTTPMetrics, error) {
+	w.zoneMin, w.zoneMax = mintime, maxtime
+	return w.fakeClient.FetchHTTPMetrics(ctx, zoneIDs, mintime, maxtime, limit)
 }
 
 func (w *windowSpy) FetchErrorMetrics(ctx context.Context, zoneIDs []string, mintime, maxtime time.Time, limit int) ([]cloudflareapi.ErrorGroup, error) {
@@ -1329,5 +1336,52 @@ func TestCollector_WindowIsMinuteAligned(t *testing.T) {
 
 	if !spy.max.Equal(spy.max.Truncate(time.Minute)) || spy.max.Sub(spy.min) != 2*time.Minute {
 		t.Errorf("window = [%v, %v), want whole-minute bounds spanning 2m", spy.min, spy.max)
+	}
+}
+
+func TestCollector_ZoneLagShiftsOnlyZoneWindow(t *testing.T) {
+	cases := []struct {
+		name           string
+		lag, zoneLag   time.Duration
+		wantZoneBehind time.Duration
+	}{
+		{"zone lag unset follows lag", 4 * time.Minute, 0, 0},
+		{"zone lag longer", 4 * time.Minute, 8 * time.Minute, 4 * time.Minute},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			spy := &windowSpy{fakeClient: newFake()}
+			opts := testOptions()
+			opts.Lag, opts.ZoneLag = tc.lag, tc.zoneLag
+			gather(t, New(spy, []config.DiscoveryJob{{Name: "all"}}, opts, newTestLogger()))
+
+			if got := spy.max.Sub(spy.zoneMax); got != tc.wantZoneBehind {
+				t.Errorf("zone window ends %v before the adaptive one, want %v", got, tc.wantZoneBehind)
+			}
+			if spy.zoneMax.Sub(spy.zoneMin) != time.Minute || !spy.zoneMax.Equal(spy.zoneMax.Truncate(time.Minute)) {
+				t.Errorf("zone window = [%v, %v), want a whole minute", spy.zoneMin, spy.zoneMax)
+			}
+		})
+	}
+}
+
+func TestCollector_TimestampsFollowEachDatasetsWindow(t *testing.T) {
+	opts := testOptions()
+	opts.Lag, opts.ZoneLag, opts.Timestamps = 4*time.Minute, 8*time.Minute, true
+	out := gather(t, New(newFake(), []config.DiscoveryJob{{Name: "all"}}, opts, newTestLogger()))
+
+	ts := func(name string) int64 {
+		mf := findFamily(out, name)
+		if mf == nil || len(mf.GetMetric()) == 0 {
+			t.Fatalf("family %s missing", name)
+		}
+		return mf.GetMetric()[0].GetTimestampMs()
+	}
+	zone, host := ts("cloudflare_zone_requests"), ts("cloudflare_zone_requests_host_status")
+	if got := (host - zone) / 1000; got != 4*60 {
+		t.Errorf("zone sample is %ds older than the adaptive one, want 240 (ZoneLag - Lag)", got)
+	}
+	if zone%60000 != 0 || host%60000 != 0 {
+		t.Errorf("timestamps %d, %d are not minute-aligned", zone, host)
 	}
 }

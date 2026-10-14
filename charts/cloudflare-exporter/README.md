@@ -29,6 +29,7 @@ first — the chart does not build or push images itself.
 | `exporter.configPath` | `/etc/cloudflare-exporter/config.yaml` | Passed as `-config`; also drives the ConfigMap mount path and key. |
 | `exporter.analyticsWindow` | `1m` | `-analytics-window` |
 | `exporter.analyticsLag` | `5m` | `-analytics-lag` |
+| `exporter.zoneAnalyticsLag` | `0s` | `-zone-analytics-lag`; `0s` means the same as `analyticsLag` |
 | `exporter.analyticsTimestamps` | `false` | `-analytics-timestamps` |
 | `exporter.queryLimit` | `10000` | `-query-limit` |
 | `exporter.metricsPath` | `/metrics` | Written into `config.yaml`'s `server.metricsPath`. |

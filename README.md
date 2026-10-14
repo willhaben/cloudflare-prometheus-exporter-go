@@ -86,8 +86,9 @@ Command-line flags (all optional):
 |------|---------|-------------|
 | `-config` | `/etc/cloudflare-exporter/config.yaml` | Path to the YAML config file |
 | `-analytics-window` | `1m` | Time range each analytics metric is summed over per scrape; whole minutes only, ending on a minute boundary |
-| `-analytics-lag` | `5m` | How far behind "now" the window ends, allowing for Cloudflare's ingestion delay |
-| `-analytics-timestamps` | `false` | Stamp analytics samples with the window start so each minute is stored once however often it is scraped. Needs a scrape interval of at most `1m` and `-analytics-lag` + `-analytics-window` well under Prometheus' 5m lookback |
+| `-analytics-lag` | `5m` | How far behind "now" the window ends, allowing for Cloudflare's ingestion delay; applies to the adaptive datasets (host, error, bandwidth, WAF, DNS metrics) |
+| `-zone-analytics-lag` | `0` | Same as `-analytics-lag` for the `httpRequests1mGroups` (`cloudflare_zone_*`) metrics, which Cloudflare finalises later than the adaptive datasets. `0` means the same as `-analytics-lag` |
+| `-analytics-timestamps` | `false` | Stamp each sample with the start of its own dataset's window so each minute is stored once however often it is scraped; a minute is never corrected after it is published. Needs a scrape interval of at most `1m`. Instant queries only see series younger than Prometheus' 5m lookback, so keep `-analytics-lag` + `-analytics-window` under it for the series you alert on. In one 6-minute local sample the adaptive datasets were final at ~4m and `httpRequests1mGroups` took longer (e.g. lag 4m, zone lag 8m); Cloudflare documents no guarantee, so measure for your zones |
 | `-query-limit` | `10000` | Max GraphQL result rows requested per zone |
 
 ### Scrape interval and Cloudflare rate limits

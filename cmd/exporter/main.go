@@ -42,6 +42,7 @@ func run(logger *slog.Logger) error {
 	configPath := flag.String("config", "/etc/cloudflare-exporter/config.yaml", "path to the exporter config file")
 	analyticsWindow := flag.Duration("analytics-window", time.Minute, "trailing time range of HTTP analytics summed per scrape")
 	analyticsLag := flag.Duration("analytics-lag", 5*time.Minute, "how far behind now the analytics window ends, to allow for Cloudflare ingestion delay")
+	analyticsTimestamps := flag.Bool("analytics-timestamps", false, "stamp analytics samples with the window start so each minute is stored once; needs a scrape interval of at most 1m")
 	queryLimit := flag.Int("query-limit", 10000, "max GraphQL result rows requested per zone")
 	showVersion := flag.Bool("version", false, "print the exporter version and exit")
 	flag.Parse()
@@ -53,6 +54,9 @@ func run(logger *slog.Logger) error {
 
 	if *analyticsWindow <= 0 {
 		return errors.New("-analytics-window must be positive")
+	}
+	if *analyticsWindow%time.Minute != 0 {
+		return errors.New("-analytics-window must be a whole number of minutes")
 	}
 	if *analyticsLag < 0 {
 		return errors.New("-analytics-lag must not be negative")
@@ -71,6 +75,7 @@ func run(logger *slog.Logger) error {
 		Window:             *analyticsWindow,
 		Lag:                *analyticsLag,
 		QueryLimit:         *queryLimit,
+		Timestamps:         *analyticsTimestamps,
 		ScrapeTimeout:      cfg.Server.ScrapeTimeout,
 		AccountConcurrency: cfg.Server.AccountConcurrency,
 		RequestTimeout:     cfg.Server.RequestTimeout,

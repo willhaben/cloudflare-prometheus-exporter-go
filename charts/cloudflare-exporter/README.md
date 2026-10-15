@@ -29,6 +29,7 @@ first — the chart does not build or push images itself.
 | `exporter.configPath` | `/etc/cloudflare-exporter/config.yaml` | Passed as `-config`; also drives the ConfigMap mount path and key. |
 | `exporter.analyticsWindow` | `1m` | `-analytics-window` |
 | `exporter.analyticsLag` | `5m` | `-analytics-lag` |
+| `exporter.analyticsTimestamps` | `false` | `-analytics-timestamps` |
 | `exporter.queryLimit` | `10000` | `-query-limit` |
 | `exporter.metricsPath` | `/metrics` | Written into `config.yaml`'s `server.metricsPath`. |
 | `exporter.scrapeTimeout` | `120s` | Written into `config.yaml`'s `server.scrapeTimeout`. Keep `service.annotations`' `/scrape-timeout` and `serviceMonitor.scrapeTimeout` >= this value. |

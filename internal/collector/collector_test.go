@@ -1254,3 +1254,80 @@ func TestCollector_ErrorMetricsErrorIsFatal(t *testing.T) {
 		t.Errorf("scrape_errors_total = %v, want 1", got)
 	}
 }
+
+func TestCollector_HostStatusMatchesHostTotals(t *testing.T) {
+	fc := newFake()
+	fc.errorGroups = append(fc.errorGroups,
+		cloudflareapi.ErrorGroup{ZoneTag: "zone-prod", EdgeStatus: 503, Host: "cms.example.com", Count: 4},
+		cloudflareapi.ErrorGroup{ZoneTag: "zone-prod", EdgeStatus: 200, Host: "cms.example.com", Count: 6},
+	)
+	c := New(fc, []config.DiscoveryJob{{Name: "all"}}, testOptions(), newTestLogger())
+	out := gather(t, c)
+
+	byHost := map[string]float64{}
+	for _, m := range findFamily(out, "cloudflare_zone_requests_host_status").GetMetric() {
+		for _, l := range m.GetLabel() {
+			if l.GetName() == "host" {
+				byHost[l.GetValue()] += m.GetGauge().GetValue()
+			}
+		}
+	}
+	for host, sum := range byHost {
+		total, ok := metricValue(out, "cloudflare_zone_requests_host", map[string]string{"zone_id": "zone-prod", "zone": "prod.example.com", "host": host})
+		if !ok || total != sum {
+			t.Errorf("host %q: host_status sums to %v, requests_host = %v (found %v)", host, sum, total, ok)
+		}
+	}
+	if got, ok := metricValue(out, "cloudflare_zone_requests_host_status", map[string]string{"zone_id": "zone-prod", "zone": "prod.example.com", "host": "cms.example.com", "status": "503"}); !ok || got != 4 {
+		t.Errorf("cms 503 = %v (found %v), want 4", got, ok)
+	}
+}
+
+func TestCollector_TimestampsOnlyOnAnalyticsWhenEnabled(t *testing.T) {
+	for _, enabled := range []bool{false, true} {
+		opts := testOptions()
+		opts.Timestamps = enabled
+		out := gather(t, New(newFake(), []config.DiscoveryJob{{Name: "all"}}, opts, newTestLogger()))
+
+		for name, want := range map[string]bool{
+			"cloudflare_zone_requests":             enabled,
+			"cloudflare_zone_requests_host_status": enabled,
+			"cloudflare_zone_info":                 false,
+		} {
+			mf := findFamily(out, name)
+			if mf == nil {
+				t.Fatalf("enabled=%v: family %s missing", enabled, name)
+			}
+			for _, m := range mf.GetMetric() {
+				if got := m.TimestampMs != nil; got != want {
+					t.Errorf("enabled=%v: %s has timestamp = %v, want %v", enabled, name, got, want)
+				}
+				if enabled && want && m.GetTimestampMs()%60000 != 0 {
+					t.Errorf("%s timestamp %d is not minute-aligned", name, m.GetTimestampMs())
+				}
+			}
+		}
+	}
+}
+
+// windowSpy records the window handed to FetchErrorMetrics.
+type windowSpy struct {
+	*fakeClient
+	min, max time.Time
+}
+
+func (w *windowSpy) FetchErrorMetrics(ctx context.Context, zoneIDs []string, mintime, maxtime time.Time, limit int) ([]cloudflareapi.ErrorGroup, error) {
+	w.min, w.max = mintime, maxtime
+	return w.fakeClient.FetchErrorMetrics(ctx, zoneIDs, mintime, maxtime, limit)
+}
+
+func TestCollector_WindowIsMinuteAligned(t *testing.T) {
+	spy := &windowSpy{fakeClient: newFake()}
+	opts := testOptions()
+	opts.Window = 2 * time.Minute
+	gather(t, New(spy, []config.DiscoveryJob{{Name: "all"}}, opts, newTestLogger()))
+
+	if !spy.max.Equal(spy.max.Truncate(time.Minute)) || spy.max.Sub(spy.min) != 2*time.Minute {
+		t.Errorf("window = [%v, %v), want whole-minute bounds spanning 2m", spy.min, spy.max)
+	}
+}

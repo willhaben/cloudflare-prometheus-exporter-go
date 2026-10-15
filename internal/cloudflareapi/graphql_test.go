@@ -227,23 +227,23 @@ func TestClient_FetchErrorMetrics(t *testing.T) {
 	if got[1].OriginStatus != 0 || got[1].AvgOriginDurationMs != -1 {
 		t.Errorf("unexpected second group (origin not contacted): %+v", got[1])
 	}
-	if got[1].Count != 500 {
-		t.Errorf("sampled group Count = %v, want 500 (50 records × sampleInterval 10)", got[1].Count)
+	if got[1].Count != 50 {
+		t.Errorf("sampled group Count = %v, want 50 (already extrapolated by Cloudflare, not multiplied by sampleInterval)", got[1].Count)
 	}
 	if got[0].LowConfidence || got[1].LowConfidence {
 		t.Errorf("LowConfidence = %v, %v, want false, false (sampleInterval 1 is exact, and 50 records clear the threshold)", got[0].LowConfidence, got[1].LowConfidence)
 	}
-	if got[1].EdgeRequestBytes != 500 || got[1].EdgeResponseBytes != 2000 {
-		t.Errorf("sampled group bytes = %+v, want EdgeRequestBytes=500 EdgeResponseBytes=2000 (raw × sampleInterval 10)", got[1])
+	if got[1].EdgeRequestBytes != 50 || got[1].EdgeResponseBytes != 200 {
+		t.Errorf("sampled group bytes = %+v, want EdgeRequestBytes=50 EdgeResponseBytes=200 (as returned)", got[1])
 	}
 	if got[1].WAFAttackScoreClass != "clean" || got[1].BotManagementDecision != "verified_bot" || got[1].VerifiedBotCategory != "Search Engine Crawler" {
 		t.Errorf("unexpected second group security fields: %+v", got[1])
 	}
 }
 
-// Scaling a few records by a large sampleInterval is what turns a handful of
-// requests into a six-figure estimate, so those rows are left unscaled.
-func TestFetchErrorMetrics_LowConfidenceRowsNotScaled(t *testing.T) {
+// Counts and bytes are never multiplied by sampleInterval; the low-confidence
+// flag only marks thin, sampled rows.
+func TestFetchErrorMetrics_RowsNotScaledLowConfidenceFlagged(t *testing.T) {
 	cases := []struct {
 		name              string
 		count             float64
@@ -255,7 +255,7 @@ func TestFetchErrorMetrics_LowConfidenceRowsNotScaled(t *testing.T) {
 		{"thin and heavily sampled", 2, 2915000, 2, 10, true},
 		{"thin but exact", 3, 1, 3, 10, false},
 		{"thin, no sampleInterval reported", 3, 0, 3, 10, false},
-		{"at the threshold", 10, 100, 1000, 1000, false},
+		{"at the threshold", 10, 100, 10, 10, false},
 		{"just below the threshold", 9, 100, 9, 10, true},
 	}
 	for _, tc := range cases {
@@ -277,7 +277,7 @@ func TestFetchErrorMetrics_LowConfidenceRowsNotScaled(t *testing.T) {
 			if got[0].Count != tc.wantCount || got[0].LowConfidence != tc.wantLowConfidence {
 				t.Errorf("Count = %v, LowConfidence = %v, want %v, %v", got[0].Count, got[0].LowConfidence, tc.wantCount, tc.wantLowConfidence)
 			}
-			// bytes must follow the same decision as the count.
+			// bytes are used as returned, like the count.
 			if got[0].EdgeRequestBytes != tc.wantBytes || got[0].EdgeResponseBytes != tc.wantBytes {
 				t.Errorf("bytes = %v, %v, want %v", got[0].EdgeRequestBytes, got[0].EdgeResponseBytes, tc.wantBytes)
 			}

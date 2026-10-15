@@ -7,7 +7,7 @@
 
 ## Metrics
 - Prometheus metric names must follow https://prometheus.io/docs/practices/naming/#metric-names (namespace prefix, base units, `_total`/`_info`/`_ratio` suffixes, no label values baked into the name).
-- Cloudflare `*Adaptive*` GraphQL datasets are sampled: always request `avg { sampleInterval }` and scale `count` with `estimatedCount` (internal/cloudflareapi/sampling.go). Confirm new dataset/field names by live schema introspection before using them.
+- Cloudflare `*Adaptive*` GraphQL datasets are sampled: always request `avg { sampleInterval }`. `httpRequestsAdaptiveGroups` `count` and `sum.*` are already extrapolated, so never multiply them by `sampleInterval`; compare any other dataset against an exact source before deciding (internal/cloudflareapi/sampling.go). Confirm new dataset/field names by live schema introspection before using them.
 
 ## Releasing
 Every release is a `v*` git tag; GoReleaser builds the linux/amd64 binary, publishes the GitHub Release, and pushes the container image to `ghcr.io/talosrobert/cloudflare-prometheus-exporter-go` (via the `dockers:` block in `.goreleaser.yaml`) — no extra manual step. The Helm chart's `appVersion` is the default `image.tag`, so it must match the tag — `.github/workflows/release.yml` fails otherwise. Order matters:

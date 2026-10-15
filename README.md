@@ -85,8 +85,9 @@ Command-line flags (all optional):
 | Flag | Default | Description |
 |------|---------|-------------|
 | `-config` | `/etc/cloudflare-exporter/config.yaml` | Path to the YAML config file |
-| `-analytics-window` | `1m` | Time range each analytics metric is summed over per scrape |
+| `-analytics-window` | `1m` | Time range each analytics metric is summed over per scrape; whole minutes only, ending on a minute boundary |
 | `-analytics-lag` | `5m` | How far behind "now" the window ends, allowing for Cloudflare's ingestion delay |
+| `-analytics-timestamps` | `false` | Stamp analytics samples with the window start so each minute is stored once however often it is scraped. Needs a scrape interval of at most `1m` and `-analytics-lag` + `-analytics-window` well under Prometheus' 5m lookback |
 | `-query-limit` | `10000` | Max GraphQL result rows requested per zone |
 
 ### Scrape interval and Cloudflare rate limits
@@ -149,6 +150,7 @@ Labels on every zone metric: `zone_id`, `zone`.
 | `cloudflare_zone_firewall_events_country` | `country` | Firewall/WAF events by client country |
 | `cloudflare_zone_firewall_result_truncated` | (zone labels) | 1 if that zone's WAF event result hit `-query-limit` in this scrape |
 | `cloudflare_zone_requests_customer_error` | `status`, `country`, `host` | Requests with an edge 4xx/5xx response — **high cardinality**, one series per distinct (status, country, host) combination seen in the window |
+| `cloudflare_zone_requests_host_status` | `host`, `status` | Requests by host and edge status from the same rows as `cloudflare_zone_requests_host`, so a host's errors always have a matching total — use this for per-host availability SLIs. Sampled; one series per (host, status) seen in the window; rows past `-query-limit` are dropped and flagged by `cloudflare_zone_error_result_truncated` |
 | `cloudflare_zone_requests_host` | `host` | Requests by host/subdomain — **sampled estimate** from `httpRequestsAdaptiveGroups` (unlike the exact `cloudflare_zone_requests`), **high cardinality**, one series per distinct host seen in the window |
 | `cloudflare_zone_bandwidth_host_bytes` | `host` | Bandwidth by host/subdomain — **sampled estimate** (unlike the exact `cloudflare_zone_bandwidth_bytes`), **high cardinality** |
 | `cloudflare_zone_waf_attack_score_class` | `class` | Requests by Cloudflare's WAF attack score classification (`clean`, `likely_clean`, `likely_attack`, `attack`) — sampled estimate |

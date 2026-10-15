@@ -28,6 +28,8 @@ exporter:
   configPath: /etc/cloudflare-exporter/config.yaml
   analyticsWindow: 1m
   analyticsLag: 5m
+  # Stamp samples with the window start (needs a scrape interval <= 1m).
+  analyticsTimestamps: false
   queryLimit: 10000
   metricsPath: /metrics
   # Bounds one whole scrape across every job/account/zone combined. Keep the

@@ -72,6 +72,9 @@ type Options struct {
 	// DNSRequestTimeout bounds the DNS analytics call, which queries a heavier
 	// account-wide dataset than the per-zone calls. <= 0 means no bound.
 	DNSRequestTimeout time.Duration
+	// Timestamps stamps every analytics sample with the start of the analytics
+	// window, so each minute is stored once however often it is scraped.
+	Timestamps bool
 }
 
 // Collector orchestrates discovery jobs and turns their results into
@@ -133,6 +136,7 @@ type Collector struct {
 	wafTruncatedDesc     *prometheus.Desc
 
 	customerErrorDesc          *prometheus.Desc
+	requestsHostStatusDesc     *prometheus.Desc
 	errorLowConfidenceDesc     *prometheus.Desc
 	errorRatioDesc             *prometheus.Desc
 	originResponseDurationDesc *prometheus.Desc
@@ -213,7 +217,8 @@ func New(cf cloudflareClient, jobs []config.DiscoveryJob, opts Options, logger *
 		wafTruncatedDesc:     desc("zone_firewall_result_truncated", "1 if the zone's WAF event result hit the query limit, meaning WAF metrics are undercounted", zoneLabels),
 
 		customerErrorDesc:          desc("zone_requests_customer_error", windowHelp("Requests with an edge 4xx/5xx response, by status, country, and host — high cardinality, one series per distinct (status, country, host) combination seen in the window"), withLabel(zoneLabels, "status", "country", "host")),
-		errorLowConfidenceDesc:     desc("zone_low_confidence_rows", "Sampled httpRequestsAdaptiveGroups rows this scrape left unscaled because too few records backed them; their counts and bytes are raw sample sums, so every metric fed by that dataset undercounts them rather than risking an estimate orders of magnitude too high", zoneLabels),
+		requestsHostStatusDesc:     desc("zone_requests_host_status", windowHelp("Requests by host and edge status code, from the same httpRequestsAdaptiveGroups rows as zone_requests_host so every host's errors have a matching total; one series per (host, status) seen in the window, and rows beyond -query-limit are dropped (see zone_error_result_truncated)"), withLabel(zoneLabels, "host", "status")),
+		errorLowConfidenceDesc:     desc("zone_low_confidence_rows", "Sampled httpRequestsAdaptiveGroups rows this scrape backed by too few sampled records for their extrapolated counts to be steady; a persistently high value means the analytics window is too short for the zone's sampling rate", zoneLabels),
 		errorRatioDesc:             desc("zone_error_ratio", windowHelp("4xx/5xx error ratio, by side: edge (errors / total requests) or origin (errors / requests that reached the origin, excluding edge cache hits, edge blocks, and other requests never sent to the origin)"), withLabel(zoneLabels, "side")),
 		originResponseDurationDesc: desc("zone_origin_response_duration_seconds", windowHelp("Average origin response duration, weighted by request count, across requests that reached the origin"), zoneLabels),
 		errorTruncatedDesc:         desc("zone_error_result_truncated", "1 if the zone's error/latency analytics result hit the query limit, meaning error metrics are undercounted", zoneLabels),
@@ -245,7 +250,7 @@ func (c *Collector) allDescs() []*prometheus.Desc {
 		c.threatsCountryDesc, c.threatsTypeDesc, c.pageviewsDesc, c.uniquesDesc, c.cacheHitRatioDesc,
 		c.dnsQueriesDesc, c.dnsQueriesTypeDesc, c.dnsQueriesResponseCodeDesc, c.dnsTruncatedDesc, c.dnsUnmatchedDesc,
 		c.wafEventsDesc, c.wafEventsActionDesc, c.wafEventsSourceDesc, c.wafEventsRuleDesc, c.wafEventsCountryDesc, c.wafTruncatedDesc,
-		c.customerErrorDesc, c.errorLowConfidenceDesc, c.errorRatioDesc, c.originResponseDurationDesc, c.errorTruncatedDesc,
+		c.customerErrorDesc, c.requestsHostStatusDesc, c.errorLowConfidenceDesc, c.errorRatioDesc, c.originResponseDurationDesc, c.errorTruncatedDesc,
 		c.requestsHostDesc, c.bandwidthHostDesc, c.wafAttackScoreClassDesc, c.botManagementDesc,
 	}
 }
@@ -336,10 +341,12 @@ func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 		defer cancel()
 	}
 
-	now := time.Now()
+	// Whole-minute bounds line the adaptive rows up with httpRequests1mGroups'
+	// minute buckets, which a floating window would straddle.
+	maxtime := time.Now().Add(-c.opts.Lag).Truncate(time.Minute)
 	s := &scrape{
-		mintime:        now.Add(-c.opts.Lag - c.opts.Window),
-		maxtime:        now.Add(-c.opts.Lag),
+		mintime:        maxtime.Add(-c.opts.Window),
+		maxtime:        maxtime,
 		zonesByAccount: make(map[string][]cloudflareapi.Zone),
 		emitted:        make(map[string]bool),
 		dns:            make(map[string]*dnsAccountState),
@@ -490,6 +497,25 @@ func (c *Collector) collectAccount(ctx context.Context, ch chan<- prometheus.Met
 		for k, v := range tags[z.ID] {
 			ch <- prometheus.MustNewConstMetric(c.tagInfoDesc, prometheus.GaugeValue, 1, z.ID, z.Name, k, v)
 		}
+	}
+
+	// zone_info/zone_tags_info above describe state, not a window, so only the
+	// analytics samples below are stamped.
+	if c.opts.Timestamps {
+		out := ch
+		relay := make(chan prometheus.Metric)
+		ch = relay
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			for m := range relay {
+				out <- prometheus.NewMetricWithTimestamp(s.mintime, m)
+			}
+		}()
+		defer func() {
+			close(relay)
+			<-done
+		}()
 	}
 
 	// The four analytics calls run concurrently: one slow call (DNS, see
@@ -648,6 +674,9 @@ func (c *Collector) emitWAFMetrics(ch chan<- prometheus.Metric, zoneByID map[str
 // status, country, and host.
 type customerErrorKey struct{ zoneID, status, country, host string }
 
+// hostStatusKey groups a request count by zone, host, and edge status.
+type hostStatusKey struct{ zoneID, host, status string }
+
 // botKey groups a per-Bot-Management-decision aggregate by zone, decision,
 // and verified bot category.
 type botKey struct{ zoneID, decision, botCategory string }
@@ -661,6 +690,7 @@ type botKey struct{ zoneID, decision, botCategory string }
 func (c *Collector) emitErrorMetrics(ch chan<- prometheus.Metric, zoneByID map[string]cloudflareapi.Zone, groups []cloudflareapi.ErrorGroup, queryLimit int) {
 	rowCount := make(map[string]int)
 	customerErrors := make(map[customerErrorKey]float64)
+	hostStatus := make(map[hostStatusKey]float64)
 	lowConfidenceRows := make(map[string]float64)
 	originTotal := make(map[string]float64)
 	originErrors := make(map[string]float64)
@@ -684,6 +714,8 @@ func (c *Collector) emitErrorMetrics(ch chan<- prometheus.Metric, zoneByID map[s
 		if g.EdgeStatus >= 400 {
 			customerErrors[customerErrorKey{zoneID, strconv.Itoa(g.EdgeStatus), g.Country, g.Host}] += g.Count
 		}
+
+		hostStatus[hostStatusKey{zoneID, g.Host, strconv.Itoa(g.EdgeStatus)}] += g.Count
 
 		hk := zoneLabelKey{zoneID, g.Host}
 		hostRequests[hk] += g.Count
@@ -724,6 +756,11 @@ func (c *Collector) emitErrorMetrics(ch chan<- prometheus.Metric, zoneByID map[s
 	for key, count := range customerErrors {
 		zone := zoneByID[key.zoneID]
 		ch <- prometheus.MustNewConstMetric(c.customerErrorDesc, prometheus.GaugeValue, count, zone.ID, zone.Name, key.status, key.country, key.host)
+	}
+
+	for key, count := range hostStatus {
+		zone := zoneByID[key.zoneID]
+		ch <- prometheus.MustNewConstMetric(c.requestsHostStatusDesc, prometheus.GaugeValue, count, zone.ID, zone.Name, key.host, key.status)
 	}
 
 	emitByLabel(ch, zoneByID, c.requestsHostDesc, hostRequests)

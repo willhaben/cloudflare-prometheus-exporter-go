@@ -36,6 +36,7 @@ spec:
             - -config={{ .Values.exporter.configPath }}
             - -analytics-window={{ .Values.exporter.analyticsWindow }}
             - -analytics-lag={{ .Values.exporter.analyticsLag }}
+            - -analytics-timestamps={{ .Values.exporter.analyticsTimestamps }}
             - -query-limit={{ .Values.exporter.queryLimit }}
           ports:
             - name: metrics

@@ -72,6 +72,9 @@ type Options struct {
 	// DNSRequestTimeout bounds the DNS analytics call, which queries a heavier
 	// account-wide dataset than the per-zone calls. <= 0 means no bound.
 	DNSRequestTimeout time.Duration
+	// ZoneLag is Lag for the httpRequests1mGroups metrics, which Cloudflare
+	// finalises later than the adaptive datasets. 0 means the same as Lag.
+	ZoneLag time.Duration
 	// Timestamps stamps every analytics sample with the start of the analytics
 	// window, so each minute is stored once however often it is scraped.
 	Timestamps bool
@@ -255,6 +258,38 @@ func (c *Collector) allDescs() []*prometheus.Desc {
 	}
 }
 
+// window is the half-open time range [min, max) one analytics query covers.
+type window struct{ min, max time.Time }
+
+// windowEndingAt returns the window ending lag before now. Whole-minute bounds
+// line the adaptive rows up with httpRequests1mGroups' minute buckets, which a
+// floating window would straddle.
+func (c *Collector) windowEndingAt(now time.Time, lag time.Duration) window {
+	end := now.Add(-lag).Truncate(time.Minute)
+	return window{min: end.Add(-c.opts.Window), max: end}
+}
+
+// stamped returns a channel forwarding to ch with ts attached when
+// Options.Timestamps is set, and ch itself otherwise. done must be called once
+// the caller has finished sending.
+func (c *Collector) stamped(ch chan<- prometheus.Metric, ts time.Time) (out chan<- prometheus.Metric, done func()) {
+	if !c.opts.Timestamps {
+		return ch, func() {}
+	}
+	relay := make(chan prometheus.Metric)
+	fin := make(chan struct{})
+	go func() {
+		defer close(fin)
+		for m := range relay {
+			ch <- prometheus.NewMetricWithTimestamp(ts, m)
+		}
+	}()
+	return relay, func() {
+		close(relay)
+		<-fin
+	}
+}
+
 // scrape holds per-Collect state: the time window, memoised per-account API
 // results, and the set of zones already emitted so that overlapping jobs
 // (e.g. "all zones" plus "prod only") never produce duplicate series, which
@@ -266,7 +301,8 @@ func (c *Collector) allDescs() []*prometheus.Desc {
 // metricGroups are silently ignored for that zone. Give overlapping jobs the
 // same metricGroups, or keep their zone sets disjoint.
 type scrape struct {
-	mintime, maxtime time.Time
+	// adaptive covers the *Adaptive datasets, zone httpRequests1mGroups.
+	adaptive, zone window
 
 	// mu guards zonesByAccount, emitted and dns: accounts within a job are
 	// scraped concurrently (see Options.AccountConcurrency), and while zone
@@ -341,12 +377,14 @@ func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 		defer cancel()
 	}
 
-	// Whole-minute bounds line the adaptive rows up with httpRequests1mGroups'
-	// minute buckets, which a floating window would straddle.
-	maxtime := time.Now().Add(-c.opts.Lag).Truncate(time.Minute)
+	now := time.Now()
+	zoneLag := c.opts.ZoneLag
+	if zoneLag == 0 {
+		zoneLag = c.opts.Lag
+	}
 	s := &scrape{
-		mintime:        maxtime.Add(-c.opts.Window),
-		maxtime:        maxtime,
+		adaptive:       c.windowEndingAt(now, c.opts.Lag),
+		zone:           c.windowEndingAt(now, zoneLag),
 		zonesByAccount: make(map[string][]cloudflareapi.Zone),
 		emitted:        make(map[string]bool),
 		dns:            make(map[string]*dnsAccountState),
@@ -500,24 +538,7 @@ func (c *Collector) collectAccount(ctx context.Context, ch chan<- prometheus.Met
 	}
 
 	// zone_info/zone_tags_info above describe state, not a window, so only the
-	// analytics samples below are stamped.
-	if c.opts.Timestamps {
-		out := ch
-		relay := make(chan prometheus.Metric)
-		ch = relay
-		done := make(chan struct{})
-		go func() {
-			defer close(done)
-			for m := range relay {
-				out <- prometheus.NewMetricWithTimestamp(s.mintime, m)
-			}
-		}()
-		defer func() {
-			close(relay)
-			<-done
-		}()
-	}
-
+	// analytics samples below are stamped, each with its own dataset's window.
 	// The four analytics calls run concurrently: one slow call (DNS, see
 	// Options.DNSRequestTimeout) must not add its latency to the other three.
 	var wg sync.WaitGroup
@@ -525,9 +546,11 @@ func (c *Collector) collectAccount(ctx context.Context, ch chan<- prometheus.Met
 
 	if !groups.DisableZone {
 		wg.Go(func() {
+			out, done := c.stamped(ch, s.zone.min)
+			defer done()
 			metrics, err := fetchTimed(ctx, c, accountID, "http", c.opts.RequestTimeout,
 				func(ctx context.Context) ([]cloudflareapi.ZoneHTTPMetrics, error) {
-					return c.cf.FetchHTTPMetrics(ctx, zoneIDs, s.mintime, s.maxtime, c.opts.QueryLimit)
+					return c.cf.FetchHTTPMetrics(ctx, zoneIDs, s.zone.min, s.zone.max, c.opts.QueryLimit)
 				})
 			if err != nil {
 				httpErr = err
@@ -541,50 +564,56 @@ func (c *Collector) collectAccount(ctx context.Context, ch chan<- prometheus.Met
 				if !ok {
 					continue
 				}
-				c.emitZoneMetrics(ch, zone, m)
+				c.emitZoneMetrics(out, zone, m)
 			}
 		})
 	}
 
 	if !groups.DisableFirewall {
 		wg.Go(func() {
+			out, done := c.stamped(ch, s.adaptive.min)
+			defer done()
 			// firewallEventsAdaptiveGroups needs no permission beyond what HTTP
 			// analytics already requires (verified live), so a failure here is fatal.
 			wafGroups, err := fetchTimed(ctx, c, accountID, "waf", c.opts.RequestTimeout,
 				func(ctx context.Context) ([]cloudflareapi.WAFEventGroup, error) {
-					return c.cf.FetchWAFMetrics(ctx, zoneIDs, s.mintime, s.maxtime, c.opts.QueryLimit)
+					return c.cf.FetchWAFMetrics(ctx, zoneIDs, s.adaptive.min, s.adaptive.max, c.opts.QueryLimit)
 				})
 			if err != nil {
 				wafErr = err
 				return
 			}
-			c.emitWAFMetrics(ch, zoneByID, wafGroups, c.opts.QueryLimit)
+			c.emitWAFMetrics(out, zoneByID, wafGroups, c.opts.QueryLimit)
 		})
 	}
 
 	if !groups.DisableErrors {
 		wg.Go(func() {
+			out, done := c.stamped(ch, s.adaptive.min)
+			defer done()
 			// httpRequestsAdaptiveGroups needs no permission beyond what HTTP analytics
 			// already requires (verified live), so a failure here is fatal.
 			errorGroups, err := fetchTimed(ctx, c, accountID, "errors", c.opts.RequestTimeout,
 				func(ctx context.Context) ([]cloudflareapi.ErrorGroup, error) {
-					return c.cf.FetchErrorMetrics(ctx, zoneIDs, s.mintime, s.maxtime, c.opts.QueryLimit)
+					return c.cf.FetchErrorMetrics(ctx, zoneIDs, s.adaptive.min, s.adaptive.max, c.opts.QueryLimit)
 				})
 			if err != nil {
 				errorsErr = err
 				return
 			}
-			c.emitErrorMetrics(ch, zoneByID, errorGroups, c.opts.QueryLimit)
+			c.emitErrorMetrics(out, zoneByID, errorGroups, c.opts.QueryLimit)
 		})
 	}
 
 	if !groups.DisableDNS {
 		wg.Go(func() {
+			out, done := c.stamped(ch, s.adaptive.min)
+			defer done()
 			// DNS analytics needs its own API token permission that Cloudflare does not
 			// clearly document, so a token good enough for everything else fails here.
 			dnsGroups, err := fetchTimed(ctx, c, accountID, "dns_analytics", c.opts.DNSRequestTimeout,
 				func(ctx context.Context) ([]cloudflareapi.DNSQueryGroup, error) {
-					return c.cf.FetchDNSMetrics(ctx, accountID, zoneIDs, s.mintime, s.maxtime, c.opts.QueryLimit)
+					return c.cf.FetchDNSMetrics(ctx, accountID, zoneIDs, s.adaptive.min, s.adaptive.max, c.opts.QueryLimit)
 				})
 			if err != nil {
 				c.logger.Warn("dns analytics unavailable", "account_id", accountID, "error", err)
@@ -599,7 +628,7 @@ func (c *Collector) collectAccount(ctx context.Context, ch chan<- prometheus.Met
 					"account_id", accountID, "query_limit", c.opts.QueryLimit)
 				st.truncated = true
 			}
-			unmatched := c.emitDNSMetrics(ch, zoneByID, dnsGroups)
+			unmatched := c.emitDNSMetrics(out, zoneByID, dnsGroups)
 			if len(unmatched) > 0 {
 				// Cloudflare's zone list omits type=internal zones (workers.dev and
 				// friends) whose DNS traffic it still reports, so they match no zone.

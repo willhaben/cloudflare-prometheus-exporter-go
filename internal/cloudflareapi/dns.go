@@ -52,12 +52,14 @@ type dnsMetricsResponse struct {
 
 // DNSQueryGroup is one (zone, query type, response code) bucket of DNS query
 // volume for the requested window. Count is the sampling-corrected estimate
-// of real queries, not the raw sampled records.
+// of real queries, except on a LowConfidence row, where it is the raw
+// sampled sum.
 type DNSQueryGroup struct {
-	ZoneTag      string
-	QueryType    string
-	ResponseCode string
-	Count        float64
+	ZoneTag       string
+	QueryType     string
+	ResponseCode  string
+	Count         float64
+	LowConfidence bool
 }
 
 // FetchDNSMetrics fetches DNS query analytics for zoneIDs (all of which must
@@ -84,11 +86,19 @@ func (c *Client) FetchDNSMetrics(ctx context.Context, accountID string, zoneIDs 
 	var out []DNSQueryGroup
 	for _, acct := range resp.Viewer.Accounts {
 		for _, g := range acct.DNSAnalyticsAdaptiveGroups {
+			// Scaling a handful of records by a wide sample interval invents
+			// queries, so a thin row is published as its raw sampled sum.
+			interval := g.Avg.SampleInterval
+			low := lowConfidence(g.Count, interval)
+			if low {
+				interval = 1
+			}
 			out = append(out, DNSQueryGroup{
-				ZoneTag:      g.Dimensions.ZoneTag,
-				QueryType:    g.Dimensions.QueryType,
-				ResponseCode: g.Dimensions.ResponseCode,
-				Count:        estimatedCount(g.Count, g.Avg.SampleInterval),
+				ZoneTag:       g.Dimensions.ZoneTag,
+				QueryType:     g.Dimensions.QueryType,
+				ResponseCode:  g.Dimensions.ResponseCode,
+				Count:         estimatedCount(g.Count, interval),
+				LowConfidence: low,
 			})
 		}
 	}

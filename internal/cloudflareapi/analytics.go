@@ -1,6 +1,7 @@
 package cloudflareapi
 
 import (
+	"cmp"
 	"context"
 	"time"
 )
@@ -181,9 +182,7 @@ func mergeGroup(a, b httpRequests1mGroup) httpRequests1mGroup {
 
 	// A merged group covers several buckets, so keep the earliest bucket's
 	// datetime rather than inventing one.
-	if a.Dimensions.Datetime == "" {
-		a.Dimensions = b.Dimensions
-	}
+	a.Dimensions = cmp.Or(a.Dimensions, b.Dimensions)
 
 	return a
 }

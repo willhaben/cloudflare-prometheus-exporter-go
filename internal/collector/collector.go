@@ -4,6 +4,7 @@
 package collector
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"log/slog"
@@ -140,7 +141,7 @@ type Collector struct {
 
 	customerErrorDesc          *prometheus.Desc
 	requestsHostStatusDesc     *prometheus.Desc
-	errorLowConfidenceDesc     *prometheus.Desc
+	lowConfidenceDesc          *prometheus.Desc
 	errorRatioDesc             *prometheus.Desc
 	originResponseDurationDesc *prometheus.Desc
 	errorTruncatedDesc         *prometheus.Desc
@@ -221,7 +222,7 @@ func New(cf cloudflareClient, jobs []config.DiscoveryJob, opts Options, logger *
 
 		customerErrorDesc:          desc("zone_requests_customer_error", windowHelp("Requests with an edge 4xx/5xx response, by status, country, and host — high cardinality, one series per distinct (status, country, host) combination seen in the window"), withLabel(zoneLabels, "status", "country", "host")),
 		requestsHostStatusDesc:     desc("zone_requests_host_status", windowHelp("Requests by host and edge status code, from the same httpRequestsAdaptiveGroups rows as zone_requests_host so every host's errors have a matching total; one series per (host, status) seen in the window, and rows beyond -query-limit are dropped (see zone_error_result_truncated)"), withLabel(zoneLabels, "host", "status")),
-		errorLowConfidenceDesc:     desc("zone_low_confidence_rows", "Sampled httpRequestsAdaptiveGroups rows this scrape backed by too few sampled records for their extrapolated counts to be steady; a persistently high value means the analytics window is too short for the zone's sampling rate", zoneLabels),
+		lowConfidenceDesc:          desc("zone_low_confidence_rows", "Sampled adaptive-dataset rows this scrape backed by too few sampled records for an extrapolated count to be steady; firewallEventsAdaptiveGroups and dnsAnalyticsAdaptiveGroups rows are published as raw sampled sums instead of being scaled, while httpRequestsAdaptiveGroups arrives already extrapolated by Cloudflare and is published as returned; a persistently high value means the analytics window is too short for the zone's sampling rate", withLabel(zoneLabels, "dataset")),
 		errorRatioDesc:             desc("zone_error_ratio", windowHelp("4xx/5xx error ratio, by side: edge (errors / total requests) or origin (errors / requests that reached the origin, excluding edge cache hits, edge blocks, and other requests never sent to the origin)"), withLabel(zoneLabels, "side")),
 		originResponseDurationDesc: desc("zone_origin_response_duration_seconds", windowHelp("Average origin response duration, weighted by request count, across requests that reached the origin"), zoneLabels),
 		errorTruncatedDesc:         desc("zone_error_result_truncated", "1 if the zone's error/latency analytics result hit the query limit, meaning error metrics are undercounted", zoneLabels),
@@ -253,7 +254,7 @@ func (c *Collector) allDescs() []*prometheus.Desc {
 		c.threatsCountryDesc, c.threatsTypeDesc, c.pageviewsDesc, c.uniquesDesc, c.cacheHitRatioDesc,
 		c.dnsQueriesDesc, c.dnsQueriesTypeDesc, c.dnsQueriesResponseCodeDesc, c.dnsTruncatedDesc, c.dnsUnmatchedDesc,
 		c.wafEventsDesc, c.wafEventsActionDesc, c.wafEventsSourceDesc, c.wafEventsRuleDesc, c.wafEventsCountryDesc, c.wafTruncatedDesc,
-		c.customerErrorDesc, c.requestsHostStatusDesc, c.errorLowConfidenceDesc, c.errorRatioDesc, c.originResponseDurationDesc, c.errorTruncatedDesc,
+		c.customerErrorDesc, c.requestsHostStatusDesc, c.lowConfidenceDesc, c.errorRatioDesc, c.originResponseDurationDesc, c.errorTruncatedDesc,
 		c.requestsHostDesc, c.bandwidthHostDesc, c.wafAttackScoreClassDesc, c.botManagementDesc,
 	}
 }
@@ -378,10 +379,7 @@ func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 	}
 
 	now := time.Now()
-	zoneLag := c.opts.ZoneLag
-	if zoneLag == 0 {
-		zoneLag = c.opts.Lag
-	}
+	zoneLag := cmp.Or(c.opts.ZoneLag, c.opts.Lag)
 	s := &scrape{
 		adaptive:       c.windowEndingAt(now, c.opts.Lag),
 		zone:           c.windowEndingAt(now, zoneLag),
@@ -435,10 +433,7 @@ func (c *Collector) collectJob(ctx context.Context, ch chan<- prometheus.Metric,
 		filters = append(filters, cloudflareapi.TagFilter{Key: f.Key, Value: f.Value, Negate: f.Negate})
 	}
 
-	limit := c.opts.AccountConcurrency
-	if limit <= 0 {
-		limit = 1
-	}
+	limit := max(c.opts.AccountConcurrency, 1)
 	sem := make(chan struct{}, limit)
 
 	var wg sync.WaitGroup
@@ -467,15 +462,13 @@ func (c *Collector) collectJob(ctx context.Context, ch chan<- prometheus.Metric,
 			break
 		}
 
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			defer func() { <-sem }()
 			if err := c.collectAccount(ctx, ch, s, accountID, filters, job.Groups); err != nil {
 				errOnce.Do(func() { firstErr = err })
 				failed.Store(true)
 			}
-		}()
+		})
 	}
 	wg.Wait()
 	return firstErr
@@ -670,6 +663,7 @@ func (c *Collector) emitWAFMetrics(ch chan<- prometheus.Metric, zoneByID map[str
 	bySource := make(map[zoneLabelKey]float64)
 	byRule := make(map[zoneLabelKey]float64)
 	byCountry := make(map[zoneLabelKey]float64)
+	lowConfidenceRows := make(map[string]float64)
 
 	for _, g := range groups {
 		if _, inScope := zoneByID[g.ZoneTag]; !inScope {
@@ -677,6 +671,9 @@ func (c *Collector) emitWAFMetrics(ch chan<- prometheus.Metric, zoneByID map[str
 		}
 		totals[g.ZoneTag] += g.Count
 		rowCount[g.ZoneTag]++
+		if g.LowConfidence {
+			lowConfidenceRows[g.ZoneTag]++
+		}
 		byAction[zoneLabelKey{g.ZoneTag, g.Action}] += g.Count
 		bySource[zoneLabelKey{g.ZoneTag, g.Source}] += g.Count
 		byRule[zoneLabelKey{g.ZoneTag, g.RuleID}] += g.Count
@@ -691,6 +688,7 @@ func (c *Collector) emitWAFMetrics(ch chan<- prometheus.Metric, zoneByID map[str
 			truncated = 1
 		}
 		ch <- prometheus.MustNewConstMetric(c.wafTruncatedDesc, prometheus.GaugeValue, truncated, zone.ID, zone.Name)
+		ch <- prometheus.MustNewConstMetric(c.lowConfidenceDesc, prometheus.GaugeValue, lowConfidenceRows[zoneID], zone.ID, zone.Name, datasetFirewallEventsAdaptive)
 	}
 	emitByZone(ch, zoneByID, c.wafEventsDesc, totals)
 	emitByLabel(ch, zoneByID, c.wafEventsActionDesc, byAction)
@@ -771,7 +769,7 @@ func (c *Collector) emitErrorMetrics(ch chan<- prometheus.Metric, zoneByID map[s
 			truncated = 1
 		}
 		ch <- prometheus.MustNewConstMetric(c.errorTruncatedDesc, prometheus.GaugeValue, truncated, zone.ID, zone.Name)
-		ch <- prometheus.MustNewConstMetric(c.errorLowConfidenceDesc, prometheus.GaugeValue, lowConfidenceRows[zoneID], zone.ID, zone.Name)
+		ch <- prometheus.MustNewConstMetric(c.lowConfidenceDesc, prometheus.GaugeValue, lowConfidenceRows[zoneID], zone.ID, zone.Name, datasetHTTPRequestsAdaptive)
 
 		if total := originTotal[zoneID]; total > 0 {
 			ch <- prometheus.MustNewConstMetric(c.errorRatioDesc, prometheus.GaugeValue, originErrors[zoneID]/total, zone.ID, zone.Name, "origin")
@@ -801,6 +799,14 @@ func (c *Collector) emitErrorMetrics(ch chan<- prometheus.Metric, zoneByID map[s
 	}
 }
 
+// Dataset label values on cloudflare_zone_low_confidence_rows, named after
+// the Cloudflare GraphQL dataset each row came from.
+const (
+	datasetHTTPRequestsAdaptive   = "httpRequestsAdaptiveGroups"
+	datasetFirewallEventsAdaptive = "firewallEventsAdaptiveGroups"
+	datasetDNSAnalyticsAdaptive   = "dnsAnalyticsAdaptiveGroups"
+)
+
 // zoneLabelKey groups a per-zone aggregate by one extra label value.
 type zoneLabelKey struct{ zoneID, label string }
 
@@ -826,6 +832,7 @@ func (c *Collector) emitDNSMetrics(ch chan<- prometheus.Metric, zoneByID map[str
 	totals := make(map[string]float64)
 	byType := make(map[zoneLabelKey]float64)
 	byResponseCode := make(map[zoneLabelKey]float64)
+	lowConfidenceRows := make(map[string]float64)
 
 	var unmatched []cloudflareapi.DNSQueryGroup
 	for _, g := range groups {
@@ -834,6 +841,9 @@ func (c *Collector) emitDNSMetrics(ch chan<- prometheus.Metric, zoneByID map[str
 			continue
 		}
 		totals[g.ZoneTag] += g.Count
+		if g.LowConfidence {
+			lowConfidenceRows[g.ZoneTag]++
+		}
 		byType[zoneLabelKey{g.ZoneTag, g.QueryType}] += g.Count
 		byResponseCode[zoneLabelKey{g.ZoneTag, g.ResponseCode}] += g.Count
 	}
@@ -841,6 +851,9 @@ func (c *Collector) emitDNSMetrics(ch chan<- prometheus.Metric, zoneByID map[str
 	emitByZone(ch, zoneByID, c.dnsQueriesDesc, totals)
 	emitByLabel(ch, zoneByID, c.dnsQueriesTypeDesc, byType)
 	emitByLabel(ch, zoneByID, c.dnsQueriesResponseCodeDesc, byResponseCode)
+	for zoneID, zone := range zoneByID {
+		ch <- prometheus.MustNewConstMetric(c.lowConfidenceDesc, prometheus.GaugeValue, lowConfidenceRows[zoneID], zone.ID, zone.Name, datasetDNSAnalyticsAdaptive)
+	}
 	return unmatched
 }
 

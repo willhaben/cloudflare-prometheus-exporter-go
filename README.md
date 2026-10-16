@@ -15,7 +15,7 @@ are not yet ported.
 ## Features
 
 - Discovers accounts/zones via the Cloudflare REST API (`cloudflare-go` SDK).
-- Pulls HTTP request, DNS query, and firewall/WAF event analytics via Cloudflare's GraphQL Analytics API.
+- Pulls HTTP request, DNS query, firewall/WAF event, and error/latency analytics via Cloudflare's GraphQL Analytics API, including per-host, bot-decision and WAF-attack-score breakdowns.
 - Filters which zones are scraped using Cloudflare's
   [Resource Tagging API](https://developers.cloudflare.com/resource-tagging/),
   with YACE-style `searchTags` job configuration (AND logic, key-only,
@@ -86,10 +86,11 @@ Command-line flags (all optional):
 |------|---------|-------------|
 | `-config` | `/etc/cloudflare-exporter/config.yaml` | Path to the YAML config file |
 | `-analytics-window` | `1m` | Time range each analytics metric is summed over per scrape; whole minutes only, ending on a minute boundary |
-| `-analytics-lag` | `5m` | How far behind "now" the window ends, allowing for Cloudflare's ingestion delay; applies to the adaptive datasets (host, error, bandwidth, WAF, DNS metrics) |
-| `-zone-analytics-lag` | `0` | Same as `-analytics-lag` for the `httpRequests1mGroups` (`cloudflare_zone_*`) metrics, which Cloudflare finalises later than the adaptive datasets. `0` means the same as `-analytics-lag` |
+| `-analytics-lag` | `5m` | How far behind "now" the window ends, allowing for Cloudflare's ingestion delay; applies to the adaptive datasets (host, error/latency, bot, WAF and DNS metrics, including `cloudflare_zone_bandwidth_host_bytes` — but not the exact `cloudflare_zone_bandwidth_bytes`) |
+| `-zone-analytics-lag` | `0` | Same as `-analytics-lag` for the metrics derived from `httpRequests1mGroups` (requests, bandwidth, threats, pageviews, uniques, cache hit ratio and their breakdowns), which Cloudflare finalises later than the adaptive datasets. Other `cloudflare_zone_*` metrics use `-analytics-lag`. `0` means the same as `-analytics-lag` |
 | `-analytics-timestamps` | `false` | Stamp each sample with the start of its own dataset's window so each minute is stored once however often it is scraped; a minute is never corrected after it is published. Needs a scrape interval of at most `1m`. Instant queries only see series younger than Prometheus' 5m lookback, so keep `-analytics-lag` + `-analytics-window` under it for the series you alert on. In one 6-minute local sample the adaptive datasets were final at ~4m and `httpRequests1mGroups` took longer (e.g. lag 4m, zone lag 8m); Cloudflare documents no guarantee, so measure for your zones |
-| `-query-limit` | `10000` | Max GraphQL result rows requested per zone |
+| `-query-limit` | `10000` | Max GraphQL result rows requested per zone, and per account for DNS analytics |
+| `-version` | `false` | Print the exporter version and exit |
 
 ### Scrape interval and Cloudflare rate limits
 
@@ -159,7 +160,7 @@ Labels on every zone metric: `zone_id`, `zone`.
 | `cloudflare_zone_error_ratio` | `side` | 4xx/5xx error ratio, by side: `edge` (edge 4xx/5xx responses / total requests) or `origin` (origin 4xx/5xx responses / requests that reached the origin, excludes edge cache hits, edge blocks, and anything else never sent to the origin) |
 | `cloudflare_zone_origin_response_duration_seconds` | | Average origin response duration, weighted by request count, across requests that reached the origin |
 | `cloudflare_zone_error_result_truncated` | (zone labels) | 1 if that zone's error/latency analytics result hit `-query-limit` in this scrape |
-| `cloudflare_zone_low_confidence_rows` | (zone labels) | How many sampled rows this scrape were left unscaled for resting on too few records (see [Sampling](#sampling)) |
+| `cloudflare_zone_low_confidence_rows` | `dataset` | How many sampled rows this scrape rested on too few records to extrapolate steadily, per Cloudflare dataset; on the datasets this exporter scales, those rows are published unscaled (see [Sampling](#sampling)) |
 
 Exporter self-metrics:
 
@@ -175,13 +176,14 @@ Exporter self-metrics:
 
 ### WAF/firewall event labels
 
-`source` and `kind` (not currently exposed as a label) classify which Cloudflare
-security product generated the event (WAF managed/custom rules, Bot
-Management, rate limiting, etc.). Their exact string values are not filtered
-or hardcoded here — this exporter could not sample real event data with
-non-empty `source` values during development, so guessing a filter value
-risked silently returning zero rows. Use `source` as a label in PromQL instead
-of expecting this exporter to pre-filter by product.
+`source` classifies which Cloudflare security product generated the event (WAF
+managed/custom rules, Bot Management, rate limiting, etc.) and is exposed as a
+label on `cloudflare_zone_firewall_events_source`. The related `kind` dimension
+is not queried at all. Their exact string values are not filtered or hardcoded
+here — this exporter could not sample real event data with non-empty `source`
+values during development, so guessing a filter value risked silently returning
+zero rows. Use `source` as a label in PromQL instead of expecting this exporter
+to pre-filter by product.
 
 ### Origin vs. edge errors
 
@@ -195,29 +197,37 @@ for `cloudflare_zone_requests_status`, at no extra API cost.
 
 ### Sampling
 
-Cloudflare's `*Adaptive*` datasets — behind the WAF, DNS, and error/latency metrics here —
-are [adaptively sampled](https://developers.cloudflare.com/analytics/sampling/): under load,
-only a fraction of events is stored, and each stored event carries a `sampleInterval` (the
-reciprocal of its inclusion probability). The raw `count` in those datasets is the number of
-*sampled records*, so this exporter reports `count × avg(sampleInterval)` per group — the
-same estimate Cloudflare's own dashboard shows. Verified live: a low-traffic zone already
-returned a group with `count=44502` and `sampleInterval≈1.18`, i.e. ~18% more real requests
-than the raw count. The HTTP request metrics come from `httpRequests1mGroups`, a
-non-sampled rollup, and are exact. The `*_result_truncated` gauges count raw rows against
-`-query-limit`, unaffected by sampling.
+Cloudflare's `*Adaptive*` datasets are
+[adaptively sampled](https://developers.cloudflare.com/analytics/sampling/): under load only
+a fraction of events is stored, and each stored event carries a `sampleInterval` (the
+reciprocal of its inclusion probability). Three of those datasets are used here, and they do
+not all need the same treatment.
 
-That estimate is only as good as the sample it rests on. A group holding two sampled records
-and a `sampleInterval` in the millions extrapolates to millions of requests that never
-happened, for one scrape, and is back to normal on the next. Every metric built on this
-dataset is exposed, not just the error ones, since they all sum the same scaled row counts.
+`firewallEventsAdaptiveGroups` and `dnsAnalyticsAdaptiveGroups` report `count` as the number
+of *sampled records*, so this exporter reports `count × avg(sampleInterval)` per group — the
+same estimate Cloudflare's own dashboard shows. `httpRequestsAdaptiveGroups`, behind the
+error/latency, host, bot and WAF-score metrics, is different: Cloudflare already extrapolates
+its `count` and `sum.*`, verified against `httpRequests1mGroups`. Those rows are published as
+returned, because scaling them a second time would double-count. The HTTP request metrics
+themselves come from `httpRequests1mGroups`, a non-sampled rollup, and are exact. The
+`*_result_truncated` gauges count raw rows against `-query-limit`, unaffected by sampling.
 
-So a row carrying fewer than 10 records is not scaled at all: its count and bytes are
-published as the raw sampled sums. That undercounts the row, but the error is bounded by the
-sampling rate, whereas the extrapolation it replaces is not bounded by anything. Rows with a
-`sampleInterval` of 1 are exact rather than estimated, so they are always published as-is, no
-matter how few records they hold. `cloudflare_zone_low_confidence_rows` counts the unscaled
-rows per zone: a persistently high value means the window is too short for the sampling rate
-that zone currently gets.
+An extrapolation is only as good as the sample under it. A group holding two sampled records
+and a `sampleInterval` in the millions stands for millions of events that never happened, for
+one scrape, and is back to normal on the next.
+
+So on the two datasets this exporter scales itself, a row carrying fewer than 10 records is
+not scaled at all: its count is published as the raw sampled sum. That undercounts the row,
+but the error is bounded by the sampling rate, whereas the extrapolation it replaces is not
+bounded by anything. Rows with a `sampleInterval` of 1 are exact rather than estimated, so
+they are always published as-is, no matter how few records they hold.
+
+`cloudflare_zone_low_confidence_rows` counts these thin rows per zone, split by `dataset`. On
+`firewallEventsAdaptiveGroups` and `dnsAnalyticsAdaptiveGroups` the counted rows are the ones
+left unscaled. On `httpRequestsAdaptiveGroups` nothing is withheld — the label marks rows
+whose Cloudflare-side extrapolation rests on few records, so treat a high value there as a
+warning about the number, not a change to it. In every case a persistently high value means
+the window is too short for the sampling rate that zone currently gets.
 
 ### Partial-permission behaviour
 
@@ -266,7 +276,7 @@ a `"not authorized for that account"` GraphQL error scoped to
 
 | Path | Description |
 |------|-------------|
-| `/metrics` | Prometheus metrics |
+| `/metrics` | Prometheus metrics (path configurable via `metricsPath`) |
 | `/healthz` | Liveness/readiness check |
 
 ## Running locally

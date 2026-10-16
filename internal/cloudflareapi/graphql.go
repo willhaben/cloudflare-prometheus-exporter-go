@@ -12,8 +12,8 @@ import (
 const graphqlEndpoint = "https://api.cloudflare.com/client/v4/graphql"
 
 // GraphQLClient is a minimal client for Cloudflare's GraphQL Analytics API,
-// which the official cloudflare-go SDK does not expose (it only wraps the
-// REST API; see docs/decisions.md).
+// which the official cloudflare-go SDK does not expose: it only wraps the
+// REST API.
 type GraphQLClient struct {
 	endpoint   string
 	apiToken   string

@@ -20,7 +20,7 @@ first — the chart does not build or push images itself.
 | Key | Default | Description |
 |-----|---------|--------------|
 | `replicaCount` | `1` | Stateless exporter; run exactly one replica per config. |
-| `image.repository` | `cloudflare-prometheus-exporter-go` | Image repository, without tag. |
+| `image.repository` | `ghcr.io/willhaben/cloudflare-prometheus-exporter-go` | Image repository, without tag. |
 | `image.tag` | `""` | Defaults to `Chart.AppVersion`. |
 | `image.pullPolicy` | `IfNotPresent` | |
 | `apiToken.existingSecret` | `""` | Name of a Secret you created yourself holding the token. Recommended. |

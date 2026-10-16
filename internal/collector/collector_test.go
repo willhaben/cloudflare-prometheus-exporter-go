@@ -824,9 +824,7 @@ type concurrencyTrackingClient struct {
 func (f *concurrencyTrackingClient) ListZones(ctx context.Context, accountID string) ([]cloudflareapi.Zone, error) {
 	f.mu.Lock()
 	f.inFlight++
-	if f.inFlight > f.maxInFlight {
-		f.maxInFlight = f.inFlight
-	}
+	f.maxInFlight = max(f.maxInFlight, f.inFlight)
 	f.mu.Unlock()
 
 	time.Sleep(10 * time.Millisecond)
@@ -887,9 +885,7 @@ type fetchConcurrencyTrackingClient struct {
 func (f *fetchConcurrencyTrackingClient) begin() {
 	f.mu.Lock()
 	f.inFlight++
-	if f.inFlight > f.maxInFlight {
-		f.maxInFlight = f.inFlight
-	}
+	f.maxInFlight = max(f.maxInFlight, f.inFlight)
 	f.mu.Unlock()
 }
 
@@ -1089,7 +1085,7 @@ func TestCollector_CustomerErrorMetrics(t *testing.T) {
 		t.Error("non-error edge status must not produce a customer_error series")
 	}
 
-	if got, ok := metricValue(out, "cloudflare_zone_low_confidence_rows", map[string]string{"zone": "prod.example.com", "zone_id": "zone-prod"}); !ok {
+	if got, ok := metricValue(out, "cloudflare_zone_low_confidence_rows", map[string]string{"zone": "prod.example.com", "zone_id": "zone-prod", "dataset": "httpRequestsAdaptiveGroups"}); !ok {
 		t.Error("expected a low_confidence_rows series for zone-prod")
 	} else if got != 0 {
 		t.Errorf("low_confidence_rows = %v, want 0 (no newFake() row is flagged)", got)
@@ -1108,7 +1104,7 @@ func TestCollector_LowConfidenceRowsCounted(t *testing.T) {
 
 	out := gather(t, c)
 
-	if got, ok := metricValue(out, "cloudflare_zone_low_confidence_rows", map[string]string{"zone": "prod.example.com", "zone_id": "zone-prod"}); !ok {
+	if got, ok := metricValue(out, "cloudflare_zone_low_confidence_rows", map[string]string{"zone": "prod.example.com", "zone_id": "zone-prod", "dataset": "httpRequestsAdaptiveGroups"}); !ok {
 		t.Error("expected a low_confidence_rows series for zone-prod")
 	} else if got != 2 {
 		t.Errorf("low_confidence_rows = %v, want 2 (one per flagged row, not per aggregated key)", got)
@@ -1122,8 +1118,44 @@ func TestCollector_LowConfidenceRowsCounted(t *testing.T) {
 	}
 
 	// zones that saw no flagged row still report 0, like the truncation gauge.
-	if got, ok := metricValue(out, "cloudflare_zone_low_confidence_rows", map[string]string{"zone": "dev.example.com", "zone_id": "zone-dev"}); ok && got != 0 {
+	if got, ok := metricValue(out, "cloudflare_zone_low_confidence_rows", map[string]string{"zone": "dev.example.com", "zone_id": "zone-dev", "dataset": "httpRequestsAdaptiveGroups"}); ok && got != 0 {
 		t.Errorf("low_confidence_rows{zone-dev} = %v, want 0", got)
+	}
+}
+
+// The WAF and DNS datasets are scaled by the exporter, so a thin row there is
+// left unscaled and counted under its own dataset label.
+func TestCollector_LowConfidenceRowsPerDataset(t *testing.T) {
+	fc := newFake()
+	fc.wafGroups = append(fc.wafGroups,
+		cloudflareapi.WAFEventGroup{ZoneTag: "zone-prod", Action: "challenge", Source: "botManagement", Country: "AT", Count: 2, LowConfidence: true},
+	)
+	fc.dnsGroups = append(fc.dnsGroups,
+		cloudflareapi.DNSQueryGroup{ZoneTag: "zone-prod", QueryType: "AAAA", ResponseCode: "NXDOMAIN", Count: 1, LowConfidence: true},
+		cloudflareapi.DNSQueryGroup{ZoneTag: "zone-prod", QueryType: "A", ResponseCode: "SERVFAIL", Count: 3, LowConfidence: true},
+	)
+	c := New(fc, []config.DiscoveryJob{{Name: "all"}}, testOptions(), newTestLogger())
+
+	out := gather(t, c)
+
+	for _, tc := range []struct {
+		dataset string
+		want    float64
+	}{
+		{"firewallEventsAdaptiveGroups", 1},
+		{"dnsAnalyticsAdaptiveGroups", 2},
+		{"httpRequestsAdaptiveGroups", 0},
+	} {
+		got, ok := metricValue(out, "cloudflare_zone_low_confidence_rows", map[string]string{
+			"zone": "prod.example.com", "zone_id": "zone-prod", "dataset": tc.dataset,
+		})
+		if !ok {
+			t.Errorf("expected a low_confidence_rows series for dataset=%s", tc.dataset)
+			continue
+		}
+		if got != tc.want {
+			t.Errorf("low_confidence_rows{dataset=%s} = %v, want %v", tc.dataset, got, tc.want)
+		}
 	}
 }
 

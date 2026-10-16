@@ -14,8 +14,8 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 
-	"github.com/talosrobert/cloudflare-prometheus-exporter-go/internal/cloudflareapi"
-	"github.com/talosrobert/cloudflare-prometheus-exporter-go/internal/config"
+	"github.com/willhaben/cloudflare-prometheus-exporter-go/internal/cloudflareapi"
+	"github.com/willhaben/cloudflare-prometheus-exporter-go/internal/config"
 )
 
 const namespace = "cloudflare"

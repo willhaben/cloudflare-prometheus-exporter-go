@@ -1,4 +1,4 @@
-module github.com/talosrobert/cloudflare-prometheus-exporter-go
+module github.com/willhaben/cloudflare-prometheus-exporter-go
 
 go 1.26.8
 

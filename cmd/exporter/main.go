@@ -19,9 +19,9 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
-	"github.com/talosrobert/cloudflare-prometheus-exporter-go/internal/cloudflareapi"
-	"github.com/talosrobert/cloudflare-prometheus-exporter-go/internal/collector"
-	"github.com/talosrobert/cloudflare-prometheus-exporter-go/internal/config"
+	"github.com/willhaben/cloudflare-prometheus-exporter-go/internal/cloudflareapi"
+	"github.com/willhaben/cloudflare-prometheus-exporter-go/internal/collector"
+	"github.com/willhaben/cloudflare-prometheus-exporter-go/internal/config"
 )
 
 const shutdownGracePeriod = 15 * time.Second

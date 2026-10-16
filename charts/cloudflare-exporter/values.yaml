@@ -1,7 +1,7 @@
 replicaCount: 1
 
 image:
-  repository: ghcr.io/talosrobert/cloudflare-prometheus-exporter-go
+  repository: ghcr.io/willhaben/cloudflare-prometheus-exporter-go
   # Defaults to Chart.AppVersion when empty.
   tag: ""
   pullPolicy: IfNotPresent

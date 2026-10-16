@@ -20,8 +20,8 @@ dockers:
     ids: [cloudflare-exporter]
     dockerfile: Containerfile.release
     image_templates:
-      - "ghcr.io/talosrobert/cloudflare-prometheus-exporter-go:{{ .Tag }}"
-      - "ghcr.io/talosrobert/cloudflare-prometheus-exporter-go:latest"
+      - "ghcr.io/willhaben/cloudflare-prometheus-exporter-go:{{ .Tag }}"
+      - "ghcr.io/willhaben/cloudflare-prometheus-exporter-go:latest"
 
 archives:
   - id: cloudflare-exporter

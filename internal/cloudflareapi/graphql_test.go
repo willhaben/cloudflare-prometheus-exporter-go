@@ -142,7 +142,8 @@ func TestClient_FetchDNSMetrics(t *testing.T) {
 		}
 		_, _ = w.Write([]byte(`{"data":{"viewer":{"accounts":[{"dnsAnalyticsAdaptiveGroups":[
 			{"count":10,"dimensions":{"zoneTag":"zone-1","queryType":"A","responseCode":"NOERROR"}},
-			{"count":1,"avg":{"sampleInterval":3},"dimensions":{"zoneTag":"zone-1","queryType":"A","responseCode":"NXDOMAIN"}}
+			{"count":20,"avg":{"sampleInterval":3},"dimensions":{"zoneTag":"zone-1","queryType":"A","responseCode":"NXDOMAIN"}},
+			{"count":1,"avg":{"sampleInterval":3},"dimensions":{"zoneTag":"zone-1","queryType":"AAAA","responseCode":"NXDOMAIN"}}
 		]}]}}}`))
 	})
 
@@ -150,16 +151,20 @@ func TestClient_FetchDNSMetrics(t *testing.T) {
 	if err != nil {
 		t.Fatalf("FetchDNSMetrics() error = %v", err)
 	}
-	if len(got) != 2 {
-		t.Fatalf("got %d groups, want 2: %+v", len(got), got)
+	if len(got) != 3 {
+		t.Fatalf("got %d groups, want 3: %+v", len(got), got)
 	}
 	// No avg block at all: taken at face value.
 	if got[0].Count != 10 || got[0].QueryType != "A" || got[0].ResponseCode != "NOERROR" {
 		t.Errorf("unexpected first group: %+v", got[0])
 	}
-	// One sampled record standing for three queries.
-	if got[1].Count != 3 {
-		t.Errorf("sampled group Count = %v, want 3 (1 record × sampleInterval 3)", got[1].Count)
+	// Enough records to believe the extrapolation: 20 × 3.
+	if got[1].Count != 60 || got[1].LowConfidence {
+		t.Errorf("sampled group Count = %v, LowConfidence = %v, want 60 and false", got[1].Count, got[1].LowConfidence)
+	}
+	// One record behind a sampleInterval of 3: flagged and left unscaled.
+	if got[2].Count != 1 || !got[2].LowConfidence {
+		t.Errorf("thin group Count = %v, LowConfidence = %v, want 1 and true", got[2].Count, got[2].LowConfidence)
 	}
 }
 
@@ -174,7 +179,8 @@ func TestClient_FetchWAFMetrics(t *testing.T) {
 		}
 		_, _ = w.Write([]byte(`{"data":{"viewer":{"zones":[{"zoneTag":"zone-1","firewallEventsAdaptiveGroups":[
 			{"count":5,"avg":{"sampleInterval":1},"dimensions":{"action":"block","source":"waf","ruleId":"abc123","clientCountryName":"US"}},
-			{"count":2,"avg":{"sampleInterval":2.5},"dimensions":{"action":"challenge","source":"botManagement","ruleId":"","clientCountryName":"DE"}}
+			{"count":20,"avg":{"sampleInterval":2.5},"dimensions":{"action":"challenge","source":"botManagement","ruleId":"","clientCountryName":"DE"}},
+			{"count":2,"avg":{"sampleInterval":2.5},"dimensions":{"action":"challenge","source":"botManagement","ruleId":"","clientCountryName":"AT"}}
 		]}]}}}`))
 	})
 
@@ -182,14 +188,20 @@ func TestClient_FetchWAFMetrics(t *testing.T) {
 	if err != nil {
 		t.Fatalf("FetchWAFMetrics() error = %v", err)
 	}
-	if len(got) != 2 {
-		t.Fatalf("got %d groups, want 2: %+v", len(got), got)
+	if len(got) != 3 {
+		t.Fatalf("got %d groups, want 3: %+v", len(got), got)
 	}
-	if got[0].Count != 5 || got[0].Action != "block" || got[0].Source != "waf" || got[0].RuleID != "abc123" || got[0].Country != "US" {
+	// A sampleInterval of 1 is exact, so 5 records stay 5 however few they are.
+	if got[0].Count != 5 || got[0].LowConfidence || got[0].Action != "block" || got[0].Source != "waf" || got[0].RuleID != "abc123" || got[0].Country != "US" {
 		t.Errorf("unexpected first group: %+v", got[0])
 	}
-	if got[1].Count != 5 {
-		t.Errorf("sampled group Count = %v, want 5 (2 records × sampleInterval 2.5)", got[1].Count)
+	// Enough records to believe the extrapolation: 20 × 2.5.
+	if got[1].Count != 50 || got[1].LowConfidence {
+		t.Errorf("sampled group Count = %v, LowConfidence = %v, want 50 and false", got[1].Count, got[1].LowConfidence)
+	}
+	// Two records behind a sampleInterval of 2.5: flagged and left unscaled.
+	if got[2].Count != 2 || !got[2].LowConfidence {
+		t.Errorf("thin group Count = %v, LowConfidence = %v, want 2 and true", got[2].Count, got[2].LowConfidence)
 	}
 }
 

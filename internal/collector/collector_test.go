@@ -16,8 +16,8 @@ import (
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	dto "github.com/prometheus/client_model/go"
 
-	"github.com/talosrobert/cloudflare-prometheus-exporter-go/internal/cloudflareapi"
-	"github.com/talosrobert/cloudflare-prometheus-exporter-go/internal/config"
+	"github.com/willhaben/cloudflare-prometheus-exporter-go/internal/cloudflareapi"
+	"github.com/willhaben/cloudflare-prometheus-exporter-go/internal/config"
 )
 
 type fakeClient struct {

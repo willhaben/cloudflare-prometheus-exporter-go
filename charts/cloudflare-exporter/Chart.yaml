@@ -4,9 +4,9 @@ description: Prometheus exporter for Cloudflare zone analytics (HTTP, DNS, WAF),
 type: application
 version: 0.4.5
 appVersion: "0.4.5"
-home: https://github.com/talosrobert/cloudflare-prometheus-exporter-go
+home: https://github.com/willhaben/cloudflare-prometheus-exporter-go
 sources:
-  - https://github.com/talosrobert/cloudflare-prometheus-exporter-go
+  - https://github.com/willhaben/cloudflare-prometheus-exporter-go
 keywords:
   - cloudflare
   - prometheus

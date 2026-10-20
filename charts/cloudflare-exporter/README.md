@@ -1,6 +1,6 @@
 # cloudflare-exporter
 
-Helm chart for [cloudflare-prometheus-exporter-go](https://github.com/talosrobert/cloudflare-prometheus-exporter-go).
+Helm chart for [cloudflare-prometheus-exporter-go](https://github.com/willhaben/cloudflare-prometheus-exporter-go).
 
 ## Install
 

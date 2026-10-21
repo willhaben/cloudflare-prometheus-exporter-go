@@ -23,12 +23,12 @@ apiToken:
   existingSecretKey: CLOUDFLARE_API_TOKEN
   value: ""
 
-# Command-line flags, see the README's flags table.
+# Command-line flags, see the flags table in the repository README.
 exporter:
   configPath: /etc/cloudflare-exporter/config.yaml
   analyticsWindow: 1m
   analyticsLag: 5m
-  # Lag for the httpRequests1mGroups (zone_*) metrics; 0s = same as analyticsLag.
+  # Lag for the metrics derived from httpRequests1mGroups; 0s = same as analyticsLag.
   zoneAnalyticsLag: 0s
   # Stamp samples with the window start (needs a scrape interval <= 1m).
   analyticsTimestamps: false

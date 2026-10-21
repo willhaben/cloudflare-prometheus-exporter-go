@@ -63,14 +63,16 @@ type wafMetricsResponse struct {
 
 // WAFEventGroup is one (zone, action, source, rule, country) bucket of
 // firewall/WAF event volume for the requested window. Count is the
-// sampling-corrected estimate of real events, not the raw sampled records.
+// sampling-corrected estimate of real events, except on a LowConfidence row,
+// where it is the raw sampled sum.
 type WAFEventGroup struct {
-	ZoneTag string
-	Action  string
-	Source  string
-	RuleID  string
-	Country string
-	Count   float64
+	ZoneTag       string
+	Action        string
+	Source        string
+	RuleID        string
+	Country       string
+	Count         float64
+	LowConfidence bool
 }
 
 // FetchWAFMetrics fetches firewall/WAF event analytics for zoneIDs in a
@@ -96,13 +98,21 @@ func (c *Client) FetchWAFMetrics(ctx context.Context, zoneIDs []string, mintime,
 	var out []WAFEventGroup
 	for _, z := range resp.Viewer.Zones {
 		for _, g := range z.FirewallEventsAdaptiveGroups {
+			// Scaling a handful of records by a wide sample interval invents
+			// events, so a thin row is published as its raw sampled sum.
+			interval := g.Avg.SampleInterval
+			low := lowConfidence(g.Count, interval)
+			if low {
+				interval = 1
+			}
 			out = append(out, WAFEventGroup{
-				ZoneTag: z.ZoneTag,
-				Action:  g.Dimensions.Action,
-				Source:  g.Dimensions.Source,
-				RuleID:  g.Dimensions.RuleID,
-				Country: g.Dimensions.ClientCountryName,
-				Count:   estimatedCount(g.Count, g.Avg.SampleInterval),
+				ZoneTag:       z.ZoneTag,
+				Action:        g.Dimensions.Action,
+				Source:        g.Dimensions.Source,
+				RuleID:        g.Dimensions.RuleID,
+				Country:       g.Dimensions.ClientCountryName,
+				Count:         estimatedCount(g.Count, interval),
+				LowConfidence: low,
 			})
 		}
 	}

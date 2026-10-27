@@ -1159,6 +1159,40 @@ func TestCollector_LowConfidenceRowsPerDataset(t *testing.T) {
 	}
 }
 
+// cloudflare_zone_bandwidth_host_cached_bytes counts only hit and revalidated
+// rows, the statuses httpRequests1mGroups cachedBytes counts.
+func TestCollector_CachedBandwidthByHost(t *testing.T) {
+	fc := newFake()
+	fc.errorGroups = append(fc.errorGroups,
+		cloudflareapi.ErrorGroup{ZoneTag: "zone-prod", EdgeStatus: 200, OriginStatus: 0, Country: "DE", Host: "static.example.com", Count: 1, CacheStatus: "hit", EdgeResponseBytes: 700},
+		cloudflareapi.ErrorGroup{ZoneTag: "zone-prod", EdgeStatus: 200, OriginStatus: 0, Country: "DE", Host: "static.example.com", Count: 1, CacheStatus: "revalidated", EdgeResponseBytes: 100},
+		cloudflareapi.ErrorGroup{ZoneTag: "zone-prod", EdgeStatus: 200, OriginStatus: 200, Country: "DE", Host: "static.example.com", Count: 1, CacheStatus: "miss", EdgeResponseBytes: 900},
+		cloudflareapi.ErrorGroup{ZoneTag: "zone-prod", EdgeStatus: 200, OriginStatus: 0, Country: "DE", Host: "static.example.com", Count: 1, CacheStatus: "dynamic", EdgeResponseBytes: 50},
+	)
+	c := New(fc, []config.DiscoveryJob{{Name: "all"}}, testOptions(), newTestLogger())
+
+	out := gather(t, c)
+
+	// static.example.com: hit 700 + revalidated 100 of 1750 total bytes.
+	if got, ok := metricValue(out, "cloudflare_zone_bandwidth_host_cached_bytes", map[string]string{
+		"zone": "prod.example.com", "zone_id": "zone-prod", "host": "static.example.com",
+	}); !ok || got != 800 {
+		t.Errorf("bandwidth_host_cached_bytes{static.example.com} = %v, ok=%v, want 800", got, ok)
+	}
+	if got, ok := metricValue(out, "cloudflare_zone_bandwidth_host_bytes", map[string]string{
+		"zone": "prod.example.com", "zone_id": "zone-prod", "host": "static.example.com",
+	}); !ok || got != 1750 {
+		t.Errorf("bandwidth_host_bytes{static.example.com} = %v, ok=%v, want 1750", got, ok)
+	}
+
+	// prod.example.com rows carry no cache status, so its series is 0 rather than absent.
+	if got, ok := metricValue(out, "cloudflare_zone_bandwidth_host_cached_bytes", map[string]string{
+		"zone": "prod.example.com", "zone_id": "zone-prod", "host": "prod.example.com",
+	}); !ok || got != 0 {
+		t.Errorf("bandwidth_host_cached_bytes{prod.example.com} = %v, ok=%v, want 0", got, ok)
+	}
+}
+
 // cloudflare_zone_requests_host and cloudflare_zone_bandwidth_host_bytes sum
 // every row for a host regardless of status — unlike customer_error, which
 // only counts edge 4xx/5xx rows.

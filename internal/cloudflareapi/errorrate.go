@@ -51,6 +51,7 @@ query ErrorMetrics($zoneIDs: [string!], $mintime: Time!, $maxtime: Time!, $limit
         dimensions {
           edgeResponseStatus
           originResponseStatus
+          cacheStatus
           clientCountryName
           clientRequestHTTPHost
           wafAttackScoreClass
@@ -79,6 +80,7 @@ type errorMetricsResponse struct {
 				Dimensions struct {
 					EdgeResponseStatus    int    `json:"edgeResponseStatus"`
 					OriginResponseStatus  int    `json:"originResponseStatus"`
+					CacheStatus           string `json:"cacheStatus"`
 					ClientCountryName     string `json:"clientCountryName"`
 					ClientRequestHost     string `json:"clientRequestHTTPHost"`
 					WAFAttackScoreClass   string `json:"wafAttackScoreClass"`
@@ -90,7 +92,7 @@ type errorMetricsResponse struct {
 	} `json:"viewer"`
 }
 
-// ErrorGroup is one (zone, edge status, origin status, country, host) bucket
+// ErrorGroup is one (zone, edge status, origin status, country, host, cache status) bucket
 // of request volume for the requested window. OriginStatus is 0 when the
 // origin was never contacted for that row. Cloudflare already extrapolates
 // count and sum.* in this dataset (verified against httpRequests1mGroups), so
@@ -102,6 +104,7 @@ type ErrorGroup struct {
 	OriginStatus          int
 	Country               string
 	Host                  string
+	CacheStatus           string
 	Count                 float64
 	LowConfidence         bool
 	AvgOriginDurationMs   float64
@@ -141,6 +144,7 @@ func (c *Client) FetchErrorMetrics(ctx context.Context, zoneIDs []string, mintim
 				OriginStatus:          g.Dimensions.OriginResponseStatus,
 				Country:               g.Dimensions.ClientCountryName,
 				Host:                  g.Dimensions.ClientRequestHost,
+				CacheStatus:           g.Dimensions.CacheStatus,
 				Count:                 g.Count,
 				LowConfidence:         lowConfidence(g.Count, g.Avg.SampleInterval),
 				AvgOriginDurationMs:   g.Avg.OriginResponseDurationMs,

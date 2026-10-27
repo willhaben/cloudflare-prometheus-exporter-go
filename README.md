@@ -1,40 +1,26 @@
 # cloudflare-prometheus-exporter-go
 
-A Prometheus exporter for Cloudflare zone analytics, structured after
-[YACE](https://github.com/nerdswords/yet-another-cloudwatch-exporter): a plain
-Go binary, YAML-configured discovery jobs, and tag-based resource filtering —
-no Cloudflare Workers runtime, deployable as an ordinary Kubernetes pod.
+A Prometheus exporter for Cloudflare zone analytics. It follows the structure of [YACE](https://github.com/nerdswords/yet-another-cloudwatch-exporter). It is a plain Go binary with YAML-configured discovery jobs and tag-based resource filtering. It does not use the Cloudflare Workers runtime. You can deploy it as an ordinary Kubernetes pod.
 
-It is a rewrite of [cloudflare-prometheus-exporter](https://github.com/talosrobert/cloudflare-prometheus-exporter)
-covering a core subset of that project's metrics: zone/account discovery, HTTP
-request analytics, and (new) Cloudflare Resource Tagging support for filtering
-which zones get scraped. Other metric families from the original (firewall,
-SSL certs, Magic Transit, Workers, Logpush, Stream, Images, network analytics)
-are not yet ported.
+This project is a rewrite of [cloudflare-prometheus-exporter](https://github.com/talosrobert/cloudflare-prometheus-exporter). It covers a core subset of the metrics of that project. The subset includes zone and account discovery, HTTP request analytics, and Cloudflare Resource Tagging. Resource Tagging filters the zones that are scraped. These metric families are not yet ported: firewall, SSL certs, Magic Transit, Workers, Logpush, Stream, Images, and network analytics.
 
 ## Features
 
-- Discovers accounts/zones via the Cloudflare REST API (`cloudflare-go` SDK).
-- Pulls HTTP request, DNS query, firewall/WAF event, and error/latency analytics via Cloudflare's GraphQL Analytics API, including per-host, bot-decision and WAF-attack-score breakdowns.
-- Filters which zones are scraped using Cloudflare's
-  [Resource Tagging API](https://developers.cloudflare.com/resource-tagging/),
-  with YACE-style `searchTags` job configuration (AND logic, key-only,
-  key=value, and negated matches).
-- Exposes matched zones' tags as Prometheus labels (`cloudflare_zone_tags_info`).
-- Stateless: every scrape queries Cloudflare directly, so it runs as a normal
-  Kubernetes Deployment with no coordination between replicas required (run
-  exactly one replica per config, same as any pull-based exporter).
+The exporter discovers accounts and zones through the Cloudflare REST API. It uses the `cloudflare-go` SDK. It reads HTTP request, DNS query, firewall and WAF event, and error and latency analytics. It uses the Cloudflare GraphQL Analytics API for this. These analytics include per-host, bot-decision, and WAF-attack-score breakdowns.
+
+The exporter filters the scraped zones with the [Resource Tagging API](https://developers.cloudflare.com/resource-tagging/). The `searchTags` job setting uses YACE-style rules. It supports AND logic, key-only matches, key=value matches, and negated matches. The exporter exposes the tags of each matched zone as Prometheus labels. The metric is `cloudflare_zone_tags_info`.
+
+The exporter stores no state. Every scrape queries Cloudflare directly. Replicas need no coordination, so you can run the exporter as a normal Kubernetes Deployment. Run exactly one replica for each configuration, as with any pull-based exporter.
 
 ## Configuration
 
-Discovery jobs live in a YAML file (default path `/etc/cloudflare-exporter/config.yaml`,
-override with `-config`); see [`config.example.yaml`](config.example.yaml).
+Discovery jobs are defined in a YAML file. The default path is `/etc/cloudflare-exporter/config.yaml`. To use another path, set `-config`. See [`config.example.yaml`](config.example.yaml).
 
 ```yaml
 discovery:
   jobs:
     - name: production-zones
-      accounts:            # optional; omit to scan every account the token can see
+      accounts:            # optional; omit to scan all accounts that the token can see
         - "0123456789abcdef0123456789abcdef"
       searchTags:          # optional; omit to scrape every zone in scope
         - key: env
@@ -47,80 +33,58 @@ discovery:
 server:
   listenAddress: ":9199"
   metricsPath: "/metrics"
-  scrapeTimeout: 120s        # bounds one whole scrape across every job/account/zone combined
-  accountConcurrency: 4      # accounts within a job scraped in parallel, sharing that budget
-  requestTimeout: 30s        # bounds a single HTTP/WAF/Errors analytics API call
-  dnsRequestTimeout: 120s    # bounds the DNS analytics call, which is structurally heavier (see below)
+  scrapeTimeout: 120s        # bounds one scrape across all jobs, accounts, and zones
+  accountConcurrency: 4      # accounts in a job that are scraped in parallel and share the budget
+  requestTimeout: 30s        # bounds one HTTP, WAF, or Errors analytics API call
+  dnsRequestTimeout: 120s    # bounds the DNS analytics call. This call is heavier (see below)
 ```
 
-A job's `metricGroups` also skips the corresponding Cloudflare API calls, not
-just the metrics. Zones are deduplicated across jobs: when two jobs select the
-same zone, the first job in config order claims it and its `metricGroups`
-apply — a later job's differing `metricGroups` are ignored for that zone.
+A job `metricGroups` setting also skips the related Cloudflare API calls. It does not skip only the metrics.
 
-Every account in every job shares one `server.scrapeTimeout` budget for that
-scrape; `server.accountConcurrency` bounds how many accounts within a job run
-in parallel against that budget, rather than serially draining it. Any
-external Prometheus scrape timeout (a `prometheus.io/scrape-timeout`
-annotation, or a ServiceMonitor's `scrapeTimeout`) must stay at least as large
-as `server.scrapeTimeout`, or Prometheus cuts the connection before the
-exporter finishes.
+Zones are deduplicated across jobs. When two jobs select the same zone, the first job in config order claims it. The `metricGroups` of that job apply. The `metricGroups` of a later job are ignored for that zone, even if they differ.
 
-Each of the four analytics calls an account makes (HTTP, WAF, Errors, DNS) is
-also individually bounded, by `server.requestTimeout` for HTTP/WAF/Errors and
-`server.dnsRequestTimeout` for DNS, and they run concurrently so a slow one
-doesn't serialize on top of the others. DNS analytics queries an account-wide
-dataset (`dnsAnalyticsAdaptiveGroups`) rather than the per-zone datasets the
-other three use, which makes it structurally heavier and, for some accounts,
-noticeably slower — hence its own, longer, timeout. Both must not exceed
-`server.scrapeTimeout`. `cloudflare_exporter_api_call_duration_seconds` (see
-below) reports actual per-call latency if you need to tune either value.
+All accounts in all jobs share one `server.scrapeTimeout` budget for each scrape. `server.accountConcurrency` sets how many accounts in one job run in parallel. These accounts use the same budget. They do not run one after another.
 
-The Cloudflare API token is **not** read from this file — set it via the
-`CLOUDFLARE_API_TOKEN` environment variable (in Kubernetes, from a Secret; see the
-[Helm chart's `apiToken`](charts/cloudflare-exporter/README.md#values) values).
+Set the external Prometheus scrape timeout to at least `server.scrapeTimeout`. The external timeout is the `prometheus.io/scrape-timeout` annotation, or the `scrapeTimeout` of a ServiceMonitor. If it is shorter, Prometheus closes the connection before the exporter finishes.
 
-Command-line flags (all optional):
+Each account makes four analytics calls: HTTP, WAF, Errors, and DNS. Each call has its own timeout. `server.requestTimeout` bounds the HTTP, WAF, and Errors calls. `server.dnsRequestTimeout` bounds the DNS call. The four calls run at the same time, so one slow call does not delay the others.
+
+DNS analytics queries an account-wide dataset, `dnsAnalyticsAdaptiveGroups`. The other three calls query per-zone datasets. The DNS query is therefore heavier. For some accounts, it is much slower. This is why it has its own, longer timeout. Do not set either timeout above `server.scrapeTimeout`. To tune the timeouts, use `cloudflare_exporter_api_call_duration_seconds` (see below). It reports the latency of each call.
+
+The exporter does not read the Cloudflare API token from this file. Set the `CLOUDFLARE_API_TOKEN` environment variable instead. In Kubernetes, take the value from a Secret. See the [Helm chart `apiToken` values](charts/cloudflare-exporter/README.md#values).
+
+Command-line flags. All flags are optional.
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `-config` | `/etc/cloudflare-exporter/config.yaml` | Path to the YAML config file |
-| `-analytics-window` | `1m` | Time range each analytics metric is summed over per scrape; whole minutes only, ending on a minute boundary |
-| `-analytics-lag` | `5m` | How far behind "now" the window ends, allowing for Cloudflare's ingestion delay; applies to the adaptive datasets (host, error/latency, bot, WAF and DNS metrics, including `cloudflare_zone_bandwidth_host_bytes` and `cloudflare_zone_bandwidth_host_cached_bytes` — but not the exact `cloudflare_zone_bandwidth_bytes`) |
-| `-zone-analytics-lag` | `0` | Same as `-analytics-lag` for the metrics derived from `httpRequests1mGroups` (requests, bandwidth, threats, pageviews, uniques, cache hit ratio and their breakdowns), which Cloudflare finalises later than the adaptive datasets. Other `cloudflare_zone_*` metrics use `-analytics-lag`. `0` means the same as `-analytics-lag` |
-| `-analytics-timestamps` | `false` | Stamp each sample with the start of its own dataset's window so each minute is stored once however often it is scraped; a minute is never corrected after it is published. Needs a scrape interval of at most `1m`. Instant queries only see series younger than Prometheus' 5m lookback, so keep `-analytics-lag` + `-analytics-window` under it for the series you alert on. In one 6-minute local sample the adaptive datasets were final at ~4m and `httpRequests1mGroups` took longer (e.g. lag 4m, zone lag 8m); Cloudflare documents no guarantee, so measure for your zones |
-| `-query-limit` | `10000` | Max GraphQL result rows requested per zone, and per account for DNS analytics |
+| `-config` | `/etc/cloudflare-exporter/config.yaml` | Path to the YAML configuration file |
+| `-analytics-window` | `1m` | Time range that each analytics metric sums over for each scrape. Use whole minutes only. The range ends on a minute boundary |
+| `-analytics-lag` | `5m` | The time between now and the end of the window. Use it to allow for Cloudflare ingestion delay. It applies to the adaptive datasets: host, error and latency, bot, WAF, and DNS metrics. This includes `cloudflare_zone_bandwidth_host_bytes` and `cloudflare_zone_bandwidth_host_cached_bytes`. It does not apply to the exact `cloudflare_zone_bandwidth_bytes` |
+| `-zone-analytics-lag` | `0` | Lag for the metrics that come from `httpRequests1mGroups`. These include requests, bandwidth, threats, page views, uniques, cache hit ratio, and their breakdowns. Cloudflare finalises this dataset later than the adaptive datasets. Other `cloudflare_zone_*` metrics use `-analytics-lag`. The value `0` means the same as `-analytics-lag` |
+| `-analytics-timestamps` | `false` | Stamp each sample with the start of its own dataset's window. Each minute is then stored once, however often it is scraped. A minute is not corrected after it is published. Use a scrape interval of at most `1m`. Instant queries see only series that are younger than the Prometheus 5m lookback. Keep `-analytics-lag` + `-analytics-window` under 5m for the series that you alert on. In one 6-minute local sample, the adaptive datasets were final at about 4m. `httpRequests1mGroups` took longer, for example with lag 4m and zone lag 8m. Cloudflare does not document a guarantee, so measure for your zones |
+| `-query-limit` | `10000` | Maximum number of GraphQL result rows requested per zone. For DNS analytics, the limit applies per account |
 | `-version` | `false` | Print the exporter version and exit |
 
 ### Scrape interval and Cloudflare rate limits
 
-There is no separate fetch/poll interval: this exporter has no background
-cache, so whatever scrapes `/metrics` — a plain Prometheus `scrape_interval`,
-a ServiceMonitor's `interval`, or a `prometheus.io/interval` annotation for
-non-Operator discovery — directly controls how often Cloudflare's GraphQL
-Analytics API gets called. Widen it if you're hitting Cloudflare's rate
-limits. If you do, raise `-analytics-window` to match, or you'll under-count:
-`httpRequests1mGroups` (backing `cloudflare_zone_requests` etc.) returns at
-most one 1-minute bucket per query, so a scrape interval wider than the
-window silently skips the traffic in between.
+The exporter has no separate fetch or poll interval. It has no background cache. Each scrape of `/metrics` queries Cloudflare directly. The scrape interval therefore sets how often the exporter calls the Cloudflare GraphQL Analytics API. The interval comes from a plain Prometheus `scrape_interval`, a ServiceMonitor `interval`, or a `prometheus.io/interval` annotation. The annotation applies to discovery without the Prometheus Operator.
+
+If Cloudflare rate limits the exporter, widen the scrape interval. Then raise `-analytics-window` to match. Otherwise the exporter under-counts. The `httpRequests1mGroups` dataset returns at most one 1-minute bucket for each query. This dataset backs metrics such as `cloudflare_zone_requests`. If the scrape interval is wider than the window, the traffic between scrapes is silently skipped.
 
 ## Metrics
 
-All `cloudflare_zone_*` analytics metrics are **gauges holding the sum over
-the analytics window** for that scrape (Cloudflare's GraphQL API returns
-per-window aggregates, not running totals, so they cannot be counters). To
-get a per-second rate, divide by `cloudflare_exporter_analytics_window_seconds`:
+All `cloudflare_zone_*` analytics metrics are gauges. Each gauge holds the sum over the analytics window for that scrape. Cloudflare's GraphQL API returns window aggregates, not running totals. So these metrics cannot be counters. To get a per-second rate, divide by `cloudflare_exporter_analytics_window_seconds`:
 
 ```promql
 cloudflare_zone_requests / on() group_left cloudflare_exporter_analytics_window_seconds
 ```
 
-Labels on every zone metric: `zone_id`, `zone`.
+Every zone metric has the labels `zone_id` and `zone`.
 
 | Metric | Extra labels | Description |
 |--------|--------------|-------------|
-| `cloudflare_zone_info` | `account_id`, `account`, `status` | Discovered zone, always 1 |
-| `cloudflare_zone_tags_info` | `tag_key`, `tag_value` | One series per resource tag on the zone, always 1 |
+| `cloudflare_zone_info` | `account_id`, `account`, `status` | Discovered zone. The value is always 1 |
+| `cloudflare_zone_tags_info` | `tag_key`, `tag_value` | One series for each resource tag on the zone. The value is always 1 |
 | `cloudflare_zone_requests` | | Requests |
 | `cloudflare_zone_requests_cached` | | Cached requests |
 | `cloudflare_zone_requests_ssl_encrypted` | | SSL-encrypted requests |
@@ -141,123 +105,77 @@ Labels on every zone metric: `zone_id`, `zone`.
 | `cloudflare_zone_threats_type` | `type` | Threats by type |
 | `cloudflare_zone_pageviews` | | Page views |
 | `cloudflare_zone_uniques` | | Unique visitors |
-| `cloudflare_zone_cache_hit_ratio` | | Cached requests / requests |
+| `cloudflare_zone_cache_hit_ratio` | | Cached requests divided by requests |
 | `cloudflare_zone_dns_queries` | | DNS queries |
-| `cloudflare_zone_dns_queries_type` | `query_type` | DNS queries by query type (A, AAAA, MX, ...) |
-| `cloudflare_zone_dns_queries_response_code` | `response_code` | DNS queries by response code (NOERROR, NXDOMAIN, ...) |
-| `cloudflare_zone_firewall_events` | | Firewall/WAF events |
-| `cloudflare_zone_firewall_events_action` | `action` | Firewall/WAF events by action (block, challenge, log, skip, ...) |
-| `cloudflare_zone_firewall_events_source` | `source` | Firewall/WAF events by triggering product (waf, botManagement, rateLimit, ...) |
-| `cloudflare_zone_firewall_events_rule` | `rule_id` | Firewall/WAF events by rule ID — **high cardinality**, one series per distinct rule seen in the window |
-| `cloudflare_zone_firewall_events_country` | `country` | Firewall/WAF events by client country |
-| `cloudflare_zone_firewall_result_truncated` | (zone labels) | 1 if that zone's WAF event result hit `-query-limit` in this scrape |
-| `cloudflare_zone_requests_customer_error` | `status`, `country`, `host` | Requests with an edge 4xx/5xx response — **high cardinality**, one series per distinct (status, country, host) combination seen in the window |
-| `cloudflare_zone_requests_host_status` | `host`, `status` | Requests by host and edge status from the same rows as `cloudflare_zone_requests_host`, so a host's errors always have a matching total — use this for per-host availability SLIs. Sampled; one series per (host, status) seen in the window; rows past `-query-limit` are dropped and flagged by `cloudflare_zone_error_result_truncated` |
-| `cloudflare_zone_requests_host` | `host` | Requests by host/subdomain — **sampled estimate** from `httpRequestsAdaptiveGroups` (unlike the exact `cloudflare_zone_requests`), **high cardinality**, one series per distinct host seen in the window |
-| `cloudflare_zone_bandwidth_host_bytes` | `host` | Bandwidth by host/subdomain — **sampled estimate** (unlike the exact `cloudflare_zone_bandwidth_bytes`), **high cardinality** |
-| `cloudflare_zone_bandwidth_host_cached_bytes` | `host` | Bandwidth served from cache (`hit` and `revalidated`) by host/subdomain — **sampled estimate** (unlike the exact `cloudflare_zone_bandwidth_cached_bytes`), **high cardinality**; the `cacheStatus` dimension multiplies query rows, so watch `cloudflare_zone_error_result_truncated` |
-| `cloudflare_zone_waf_attack_score_class` | `class` | Requests by Cloudflare's WAF attack score classification (`clean`, `likely_clean`, `likely_attack`, `attack`) — sampled estimate |
-| `cloudflare_zone_bot_management_decision` | `decision`, `bot_category` | Requests by Bot Management decision (`likely_human`, `automated`, `likely_automated`, `verified_bot`, `other`), plus the verified bot category when known (e.g. `Search Engine Crawler`) — sampled estimate |
-| `cloudflare_zone_error_ratio` | `side` | 4xx/5xx error ratio, by side: `edge` (edge 4xx/5xx responses / total requests) or `origin` (origin 4xx/5xx responses / requests that reached the origin, excludes edge cache hits, edge blocks, and anything else never sent to the origin) |
-| `cloudflare_zone_origin_response_duration_seconds` | | Average origin response duration, weighted by request count, across requests that reached the origin |
-| `cloudflare_zone_error_result_truncated` | (zone labels) | 1 if that zone's error/latency analytics result hit `-query-limit` in this scrape |
-| `cloudflare_zone_low_confidence_rows` | `dataset` | How many sampled rows this scrape rested on too few records to extrapolate steadily, per Cloudflare dataset; on the datasets this exporter scales, those rows are published unscaled (see [Sampling](#sampling)) |
+| `cloudflare_zone_dns_queries_type` | `query_type` | DNS queries by query type, for example A, AAAA, and MX |
+| `cloudflare_zone_dns_queries_response_code` | `response_code` | DNS queries by response code, for example NOERROR and NXDOMAIN |
+| `cloudflare_zone_firewall_events` | | Firewall and WAF events |
+| `cloudflare_zone_firewall_events_action` | `action` | Firewall and WAF events by action, for example `block`, `challenge`, `log`, and `skip` |
+| `cloudflare_zone_firewall_events_source` | `source` | Firewall and WAF events by triggering product, for example `waf`, `botManagement`, and `rateLimit` |
+| `cloudflare_zone_firewall_events_rule` | `rule_id` | Firewall and WAF events by rule ID. **High cardinality**: one series for each rule seen in the window |
+| `cloudflare_zone_firewall_events_country` | `country` | Firewall and WAF events by client country |
+| `cloudflare_zone_firewall_result_truncated` | (zone labels) | 1 if the WAF event result for the zone reached `-query-limit` in this scrape |
+| `cloudflare_zone_requests_customer_error` | `status`, `country`, `host` | Requests with an edge 4xx or 5xx response. **High cardinality**: one series for each (status, country, host) combination seen in the window |
+| `cloudflare_zone_requests_host_status` | `host`, `status` | Requests by host and edge status. The rows are the same as in `cloudflare_zone_requests_host`. So the errors of a host always have a matching total. Use this metric for per-host availability SLIs. The metric is sampled. There is one series for each (host, status) combination seen in the window. Rows past `-query-limit` are dropped. `cloudflare_zone_error_result_truncated` flags this |
+| `cloudflare_zone_requests_host` | `host` | Requests by host or subdomain. This is a **sampled estimate** from `httpRequestsAdaptiveGroups`. The exact value is `cloudflare_zone_requests`. **High cardinality**: one series for each host seen in the window |
+| `cloudflare_zone_bandwidth_host_bytes` | `host` | Bandwidth by host or subdomain. This is a **sampled estimate**. The exact value is `cloudflare_zone_bandwidth_bytes`. **High cardinality** |
+| `cloudflare_zone_bandwidth_host_cached_bytes` | `host` | Bandwidth served from cache, with the `hit` and `revalidated` cache statuses, by host or subdomain. This is a **sampled estimate**. The exact value is `cloudflare_zone_bandwidth_cached_bytes`. **High cardinality**. The `cacheStatus` dimension increases the number of query rows. Watch `cloudflare_zone_error_result_truncated` |
+| `cloudflare_zone_waf_attack_score_class` | `class` | Requests by WAF attack score class. The classes are `clean`, `likely_clean`, `likely_attack`, and `attack`. This is a sampled estimate |
+| `cloudflare_zone_bot_management_decision` | `decision`, `bot_category` | Requests by Bot Management decision. The decisions are `likely_human`, `automated`, `likely_automated`, `verified_bot`, and `other`. The verified bot category is included when known, for example `Search Engine Crawler`. This is a sampled estimate |
+| `cloudflare_zone_error_ratio` | `side` | 4xx and 5xx error ratio, by side. `edge` is the edge 4xx and 5xx responses divided by all requests. `origin` is the origin 4xx and 5xx responses divided by the requests that reached the origin. The `origin` side excludes edge cache hits, edge blocks, and all other requests that the origin never receives |
+| `cloudflare_zone_origin_response_duration_seconds` | | Average origin response duration. Requests that reached the origin are weighted by request count |
+| `cloudflare_zone_error_result_truncated` | (zone labels) | 1 if the error and latency analytics result for the zone reached `-query-limit` in this scrape |
+| `cloudflare_zone_low_confidence_rows` | `dataset` | The number of sampled rows in this scrape that have too few records for a steady extrapolation, for each Cloudflare dataset. On the datasets that this exporter scales, these rows are published unscaled. See [Sampling](#sampling) |
 
 Exporter self-metrics:
 
 | Metric | Labels | Description |
 |--------|--------|-------------|
 | `cloudflare_exporter_analytics_window_seconds` | | Configured `-analytics-window` |
-| `cloudflare_exporter_job_success` | `job` | 1 if the job's last scrape succeeded, else 0 |
-| `cloudflare_exporter_scrape_errors_total` | `job` | Cumulative failed scrapes per job |
-| `cloudflare_exporter_api_errors_total` | `account_id`, `api` | Failed calls to an optional, separately permissioned API (`dns_analytics`, `resource_tagging`); non-fatal |
-| `cloudflare_exporter_api_call_duration_seconds` | `account_id`, `api` | Duration of one account's HTTP/WAF/Errors/DNS analytics call (`api` is `http`, `waf`, `errors`, or `dns_analytics`), recorded whether it succeeded or timed out |
-| `cloudflare_exporter_dns_result_truncated` | `account_id` | 1 if DNS results hit `-query-limit`, meaning DNS metrics are undercounted |
-| `cloudflare_exporter_dns_unmatched_groups` | `account_id` | DNS rows skipped because their zone was not in scope (see internal zones below) |
+| `cloudflare_exporter_job_success` | `job` | 1 if the last scrape of the job succeeded. Otherwise 0 |
+| `cloudflare_exporter_scrape_errors_total` | `job` | Cumulative failed scrapes for each job |
+| `cloudflare_exporter_api_errors_total` | `account_id`, `api` | Failed calls to an optional API that needs its own permission (`dns_analytics`, `resource_tagging`). The failure does not stop the scrape |
+| `cloudflare_exporter_api_call_duration_seconds` | `account_id`, `api` | Duration of one analytics call for one account. `api` is `http`, `waf`, `errors`, or `dns_analytics`. The duration is recorded for successful calls and for calls that timed out |
+| `cloudflare_exporter_dns_result_truncated` | `account_id` | 1 if DNS results reached `-query-limit`. The DNS metrics are then undercounted |
+| `cloudflare_exporter_dns_unmatched_groups` | `account_id` | DNS rows skipped because their zone is not in scope. See [Internal zones](#internal-zones-workersdev) |
 
 ### WAF/firewall event labels
 
-`source` classifies which Cloudflare security product generated the event (WAF
-managed/custom rules, Bot Management, rate limiting, etc.) and is exposed as a
-label on `cloudflare_zone_firewall_events_source`. The related `kind` dimension
-is not queried at all. Their exact string values are not filtered or hardcoded
-here — this exporter could not sample real event data with non-empty `source`
-values during development, so guessing a filter value risked silently returning
-zero rows. Use `source` as a label in PromQL instead of expecting this exporter
-to pre-filter by product.
+The `source` label shows which Cloudflare security product made the event. Examples are WAF managed or custom rules, Bot Management, and rate limiting. The label is on `cloudflare_zone_firewall_events_source`. The exporter does not query the `kind` dimension. The exporter does not filter or hardcode the `source` values. During development, the exporter could not sample real events with a non-empty `source`. A guessed filter value could silently return zero rows. Use `source` as a label in PromQL. Do not expect the exporter to filter by product.
 
 ### Origin vs. edge errors
 
-`cloudflare_zone_error_ratio{side="origin"}` and `cloudflare_zone_origin_response_duration_seconds`
-only consider requests that actually reached the origin. Cloudflare reports an origin status
-of `0` for requests it never forwarded — edge cache hits, edge/WAF blocks, redirects, and the
-like — and those rows are excluded rather than counted as origin successes, which would
-otherwise dilute both metrics with traffic the origin never saw. `cloudflare_zone_error_ratio{side="edge"}`
-has no such exclusion: it's edge 4xx/5xx over all requests, from the same data already used
-for `cloudflare_zone_requests_status`, at no extra API cost.
+The `origin` side of `cloudflare_zone_error_ratio` and `cloudflare_zone_origin_response_duration_seconds` counts only requests that reached the origin. Cloudflare reports origin status `0` for requests that it never forwarded. Examples are edge cache hits, edge or WAF blocks, and redirects. The exporter excludes these rows. If it counted them as origin successes, they would lower both metrics. The `edge` side of `cloudflare_zone_error_ratio` has no exclusion. It shows edge 4xx and 5xx responses divided by all requests. It uses the same data as `cloudflare_zone_requests_status`, so it has no extra API cost.
 
 ### Sampling
 
-Cloudflare's `*Adaptive*` datasets are
-[adaptively sampled](https://developers.cloudflare.com/analytics/sampling/): under load only
-a fraction of events is stored, and each stored event carries a `sampleInterval` (the
-reciprocal of its inclusion probability). Three of those datasets are used here, and they do
-not all need the same treatment.
+Cloudflare's `*Adaptive*` datasets are [adaptively sampled](https://developers.cloudflare.com/analytics/sampling/). Under load, a dataset stores only a fraction of its events. Each stored event has a `sampleInterval`. This is the reciprocal of its inclusion probability. Three of these datasets are used here. They do not all need the same treatment.
 
-`firewallEventsAdaptiveGroups` and `dnsAnalyticsAdaptiveGroups` report `count` as the number
-of *sampled records*, so this exporter reports `count × avg(sampleInterval)` per group — the
-same estimate Cloudflare's own dashboard shows. `httpRequestsAdaptiveGroups`, behind the
-error/latency, host, bot and WAF-score metrics, is different: Cloudflare already extrapolates
-its `count` and `sum.*`, verified against `httpRequests1mGroups`. Those rows are published as
-returned, because scaling them a second time would double-count. The HTTP request metrics
-themselves come from `httpRequests1mGroups`, a non-sampled rollup, and are exact. The
-`*_result_truncated` gauges count raw rows against `-query-limit`, unaffected by sampling.
+`firewallEventsAdaptiveGroups` and `dnsAnalyticsAdaptiveGroups` report `count` as the number of sampled records. So this exporter reports `count × avg(sampleInterval)` for each group. This is the same estimate that the Cloudflare dashboard shows. `httpRequestsAdaptiveGroups` supplies the error and latency, host, bot, and WAF-score metrics. It works differently. Cloudflare already extrapolates its `count` and `sum.*` fields. This was verified against `httpRequests1mGroups`. The exporter publishes these rows as returned. Scaling them again would count the traffic twice. The HTTP request metrics come from `httpRequests1mGroups`. This is a non-sampled rollup, so these metrics are exact. The `*_result_truncated` gauges count raw rows against `-query-limit`. Sampling does not affect them.
 
-An extrapolation is only as good as the sample under it. A group holding two sampled records
-and a `sampleInterval` in the millions stands for millions of events that never happened, for
-one scrape, and is back to normal on the next.
+An extrapolation is only as good as its sample. Suppose a group holds two sampled records and a `sampleInterval` in the millions. The group then stands for millions of events that never happened. This affects one scrape. The next scrape returns to normal.
 
-So on the two datasets this exporter scales itself, a row carrying fewer than 10 records is
-not scaled at all: its count is published as the raw sampled sum. That undercounts the row,
-but the error is bounded by the sampling rate, whereas the extrapolation it replaces is not
-bounded by anything. Rows with a `sampleInterval` of 1 are exact rather than estimated, so
-they are always published as-is, no matter how few records they hold.
+The exporter scales two datasets itself: `firewallEventsAdaptiveGroups` and `dnsAnalyticsAdaptiveGroups`. On these datasets, a row with fewer than 10 records is not scaled. The exporter publishes its count as the raw sampled sum. This undercounts the row. The error is limited by the sampling rate. The extrapolation that it replaces has no such limit. A row with a `sampleInterval` of 1 is exact, not estimated. The exporter always publishes these rows as they are, however few records they hold.
 
-`cloudflare_zone_low_confidence_rows` counts these thin rows per zone, split by `dataset`. On
-`firewallEventsAdaptiveGroups` and `dnsAnalyticsAdaptiveGroups` the counted rows are the ones
-left unscaled. On `httpRequestsAdaptiveGroups` nothing is withheld — the label marks rows
-whose Cloudflare-side extrapolation rests on few records, so treat a high value there as a
-warning about the number, not a change to it. In every case a persistently high value means
-the window is too short for the sampling rate that zone currently gets.
+`cloudflare_zone_low_confidence_rows` counts these thin rows for each zone. The counts are split by `dataset`. On `firewallEventsAdaptiveGroups` and `dnsAnalyticsAdaptiveGroups`, the counted rows are the rows left unscaled. The exporter withholds nothing on `httpRequestsAdaptiveGroups`. For that dataset, the label marks rows whose Cloudflare extrapolation is based on few records. A high value there is a warning about the number. It does not change the number. In all cases, a value that stays high means the window is too short for that zone's sampling rate.
 
 ### Partial-permission behaviour
 
-DNS Analytics and Resource Tagging each need their own token permission, and
-both are treated as optional so a narrow token still yields useful metrics:
+DNS Analytics and Resource Tagging each need their own token permission. Both are optional. A token with narrow permissions still returns useful metrics.
 
-- **DNS Analytics unreadable** → `cloudflare_exporter_api_errors_total{api="dns_analytics"}`
-  increments; every other metric is exported normally.
-- **Resource Tagging unreadable** → if the job has no `searchTags`, tags are
-  only decoration, so `cloudflare_exporter_api_errors_total{api="resource_tagging"}`
-  increments and the scrape continues without `cloudflare_zone_tags_info`. If the
-  job *does* have `searchTags`, the tags decide which zones to scrape, so the
-  job fails loudly instead of silently scraping the wrong set of zones.
+If DNS Analytics is unreadable, `cloudflare_exporter_api_errors_total{api="dns_analytics"}` increases. All other metrics are exported normally.
+
+If Resource Tagging is unreadable and the job has no `searchTags`, the tags only decorate the metrics. Then `cloudflare_exporter_api_errors_total{api="resource_tagging"}` increases. The scrape continues without `cloudflare_zone_tags_info`. If the job has `searchTags`, the tags decide which zones are scraped. In that case the job fails. This prevents a silent scrape of the wrong zones.
 
 ### Internal zones (workers.dev)
 
-Cloudflare's zone list excludes `type=internal` zones — `*.workers.dev` among
-them — while DNS analytics still reports their query volume. Those rows have no
-discovered zone to attach to, so they are skipped and counted in
-`cloudflare_exporter_dns_unmatched_groups` rather than dropped silently. A
-non-zero value there means DNS traffic exists for zones this exporter does not
-scrape.
+The Cloudflare zone list excludes zones with `type=internal`. `*.workers.dev` is one example. DNS analytics still reports the query volume of these zones. The exporter has no discovered zone for these rows. It skips them and counts them in `cloudflare_exporter_dns_unmatched_groups`. It does not drop them silently. A value above zero means that DNS traffic exists for zones that this exporter does not scrape.
 
-Overlapping jobs (e.g. an "all zones" job plus a "prod only" job) are safe:
-each zone is emitted once per scrape, by the first job that selects it.
+Overlapping jobs are safe. For example, an "all zones" job and a "prod only" job can overlap. The exporter emits each zone once for each scrape. The first job that selects the zone emits it.
 
 ### Creating an API Token
 
-The token needs, at minimum:
+The token needs at least these permissions:
 
 | Permission | Access |
 |------------|--------|
@@ -265,22 +183,20 @@ The token needs, at minimum:
 | Zone > Analytics | Read |
 | Account > Account Settings | Read |
 | Account Resource Tags (Resource Tagging) | Read |
-| Account > DNS Analytics (or similar — see below) | Read |
+| Account > DNS Analytics (or similar, see below) | Read |
 
-Exact permission-group labels can shift in the Cloudflare dashboard — verify
-against your account's token creation UI. The DNS Analytics permission in
-particular isn't clearly named in Cloudflare's docs; a token without it gets
-a `"not authorized for that account"` GraphQL error scoped to
-`dnsAnalyticsAdaptiveGroups` specifically, while other metrics keep working.
+Cloudflare can change the names of permission groups in the dashboard. Check the names in the token creation page of your account. The DNS Analytics permission is not clearly named in the Cloudflare documentation. A token without it returns a `"not authorized for that account"` GraphQL error. The error applies to `dnsAnalyticsAdaptiveGroups` only. The other metrics keep working.
 
 ## Endpoints
 
 | Path | Description |
 |------|-------------|
-| `/metrics` | Prometheus metrics (path configurable via `metricsPath`) |
-| `/healthz` | Liveness/readiness check |
+| `/metrics` | Prometheus metrics. Set the path with `metricsPath` |
+| `/healthz` | Liveness and readiness check |
 
 ## Running locally
+
+Set the token, start the exporter, and read the metrics:
 
 ```sh
 export CLOUDFLARE_API_TOKEN=...
@@ -290,7 +206,7 @@ curl localhost:9199/metrics
 
 ## Running in Kubernetes
 
-Deploy with the Helm chart in [`charts/cloudflare-exporter`](charts/cloudflare-exporter/README.md):
+Deploy the exporter with the Helm chart in [`charts/cloudflare-exporter`](charts/cloudflare-exporter/README.md). Create a Secret that holds the token. Then install the chart:
 
 ```sh
 kubectl create secret generic cloudflare-exporter-token \
@@ -300,24 +216,22 @@ helm install cloudflare-exporter charts/cloudflare-exporter \
   --set apiToken.existingSecret=cloudflare-exporter-token
 ```
 
-See the chart's README for the full values reference (discovery jobs, `serviceMonitor`,
-resources, tolerations, ...).
+See the chart README for the full list of values. The list includes discovery jobs, `serviceMonitor`, resources, and tolerations.
 
-Pre-built images are published to `ghcr.io/willhaben/cloudflare-prometheus-exporter-go:vX.Y.Z`
-on every tagged release — the chart's default `image.repository` already points there.
+Each tagged release publishes a pre-built image to `ghcr.io/willhaben/cloudflare-prometheus-exporter-go:vX.Y.Z`. The default `image.repository` of the chart already points to this image.
 
-To build your own instead, use the provided `Containerfile`:
+To build your own image, use the `Containerfile` that the repository provides:
 
 ```sh
 podman build -t <your-registry>/cloudflare-prometheus-exporter-go:latest -f Containerfile .
 podman push <your-registry>/cloudflare-prometheus-exporter-go:latest
 ```
 
-Then point the chart's `image.repository`/`image.tag` values at your registry.
+Then set the chart values `image.repository` and `image.tag` to your registry.
 
 ## Prometheus scrape config
 
-If not using the Prometheus Operator `ServiceMonitor`, a plain `scrape_config`:
+If you do not use the Prometheus Operator `ServiceMonitor`, add this `scrape_config`:
 
 ```yaml
 scrape_configs:
@@ -336,9 +250,7 @@ make lint    # gofmt, go vet, golangci-lint
 
 ## Releasing
 
-Binary releases are cut by GoReleaser when a `v*` tag is pushed. The Helm chart's
-`appVersion` must match that tag (it's the default `image.tag`), and the release workflow
-fails if it doesn't, so bump the chart first:
+GoReleaser creates the binary releases when you push a `v*` tag. The Helm chart `appVersion` must match that tag. It is the default `image.tag`. The release workflow fails if they do not match. Bump the chart first:
 
 ```sh
 make bump VERSION=0.2.0          # sets version and appVersion in charts/cloudflare-exporter/Chart.yaml

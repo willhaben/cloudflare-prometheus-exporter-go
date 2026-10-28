@@ -147,6 +147,7 @@ type Collector struct {
 	errorTruncatedDesc         *prometheus.Desc
 	requestsHostDesc           *prometheus.Desc
 	bandwidthHostDesc          *prometheus.Desc
+	bandwidthHostCachedDesc    *prometheus.Desc
 	wafAttackScoreClassDesc    *prometheus.Desc
 	botManagementDesc          *prometheus.Desc
 }
@@ -228,6 +229,7 @@ func New(cf cloudflareClient, jobs []config.DiscoveryJob, opts Options, logger *
 		errorTruncatedDesc:         desc("zone_error_result_truncated", "1 if the zone's error/latency analytics result hit the query limit, meaning error metrics are undercounted", zoneLabels),
 		requestsHostDesc:           desc("zone_requests_host", windowHelp("Requests by host/subdomain — sampling-corrected estimate from httpRequestsAdaptiveGroups, unlike the exact zone_requests; high cardinality, one series per distinct host seen in the window"), withLabel(zoneLabels, "host")),
 		bandwidthHostDesc:          desc("zone_bandwidth_host_bytes", windowHelp("Bandwidth by host/subdomain — sampling-corrected estimate from httpRequestsAdaptiveGroups, unlike the exact zone_bandwidth_bytes; high cardinality, one series per distinct host seen in the window"), withLabel(zoneLabels, "host")),
+		bandwidthHostCachedDesc:    desc("zone_bandwidth_host_cached_bytes", windowHelp("Cached bandwidth by host/subdomain — sampling-corrected estimate from httpRequestsAdaptiveGroups, unlike the exact zone_bandwidth_cached_bytes; high cardinality, one series per distinct host seen in the window"), withLabel(zoneLabels, "host")),
 		wafAttackScoreClassDesc:    desc("zone_waf_attack_score_class", windowHelp("Requests by Cloudflare's WAF attack score classification (clean, likely_clean, likely_attack, attack)"), withLabel(zoneLabels, "class")),
 		botManagementDesc:          desc("zone_bot_management_decision", windowHelp("Requests by Bot Management decision (likely_human, automated, likely_automated, verified_bot, other), plus the verified bot category when known"), withLabel(zoneLabels, "decision", "bot_category")),
 	}
@@ -255,7 +257,7 @@ func (c *Collector) allDescs() []*prometheus.Desc {
 		c.dnsQueriesDesc, c.dnsQueriesTypeDesc, c.dnsQueriesResponseCodeDesc, c.dnsTruncatedDesc, c.dnsUnmatchedDesc,
 		c.wafEventsDesc, c.wafEventsActionDesc, c.wafEventsSourceDesc, c.wafEventsRuleDesc, c.wafEventsCountryDesc, c.wafTruncatedDesc,
 		c.customerErrorDesc, c.requestsHostStatusDesc, c.lowConfidenceDesc, c.errorRatioDesc, c.originResponseDurationDesc, c.errorTruncatedDesc,
-		c.requestsHostDesc, c.bandwidthHostDesc, c.wafAttackScoreClassDesc, c.botManagementDesc,
+		c.requestsHostDesc, c.bandwidthHostDesc, c.bandwidthHostCachedDesc, c.wafAttackScoreClassDesc, c.botManagementDesc,
 	}
 }
 
@@ -725,6 +727,7 @@ func (c *Collector) emitErrorMetrics(ch chan<- prometheus.Metric, zoneByID map[s
 	durationWeightedCount := make(map[string]float64)
 	hostRequests := make(map[zoneLabelKey]float64)
 	hostBytes := make(map[zoneLabelKey]float64)
+	hostCachedBytes := make(map[zoneLabelKey]float64)
 	wafClassCounts := make(map[zoneLabelKey]float64)
 	botCounts := make(map[botKey]float64)
 
@@ -747,6 +750,12 @@ func (c *Collector) emitErrorMetrics(ch chan<- prometheus.Metric, zoneByID map[s
 		hk := zoneLabelKey{zoneID, g.Host}
 		hostRequests[hk] += g.Count
 		hostBytes[hk] += g.EdgeResponseBytes
+		// Same statuses httpRequests1mGroups counts as cachedBytes.
+		cachedBytes := 0.0
+		if g.CacheStatus == "hit" || g.CacheStatus == "revalidated" {
+			cachedBytes = g.EdgeResponseBytes
+		}
+		hostCachedBytes[hk] += cachedBytes
 
 		wafClassCounts[zoneLabelKey{zoneID, g.WAFAttackScoreClass}] += g.Count
 		botCounts[botKey{zoneID, g.BotManagementDecision, g.VerifiedBotCategory}] += g.Count
@@ -792,6 +801,7 @@ func (c *Collector) emitErrorMetrics(ch chan<- prometheus.Metric, zoneByID map[s
 
 	emitByLabel(ch, zoneByID, c.requestsHostDesc, hostRequests)
 	emitByLabel(ch, zoneByID, c.bandwidthHostDesc, hostBytes)
+	emitByLabel(ch, zoneByID, c.bandwidthHostCachedDesc, hostCachedBytes)
 	emitByLabel(ch, zoneByID, c.wafAttackScoreClassDesc, wafClassCounts)
 	for key, count := range botCounts {
 		zone := zoneByID[key.zoneID]

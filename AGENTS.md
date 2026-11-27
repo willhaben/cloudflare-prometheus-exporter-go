@@ -16,6 +16,7 @@
 - The `*Adaptive*` GraphQL datasets from Cloudflare are sampled. Always request `avg { sampleInterval }`.
 - Cloudflare already extrapolates `count` and `sum.*` in `httpRequestsAdaptiveGroups`. Do not multiply them by `sampleInterval`. Compare any other dataset with an exact source before you decide how to use it. See `internal/cloudflareapi/sampling.go`.
 - Before you use a new dataset or field name, confirm it with live schema introspection.
+- To add a metric, follow `.agents/skills/add-metric/SKILL.md`.
 
 ## Releasing
 A release is a `v*` git tag. GoReleaser builds the linux/amd64 binary and publishes the GitHub Release. It also pushes the container image to `ghcr.io/willhaben/cloudflare-prometheus-exporter-go`. The `dockers:` block in `.goreleaser.yaml` controls this push. No other manual step is needed.

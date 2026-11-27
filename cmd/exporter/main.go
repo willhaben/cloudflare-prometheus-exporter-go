@@ -13,11 +13,13 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"k8s.io/client-go/tools/leaderelection"
 
 	"github.com/willhaben/cloudflare-prometheus-exporter-go/internal/cloudflareapi"
 	"github.com/willhaben/cloudflare-prometheus-exporter-go/internal/collector"
@@ -45,6 +47,7 @@ func run(logger *slog.Logger) error {
 	zoneAnalyticsLag := flag.Duration("zone-analytics-lag", 0, "-analytics-lag for the metrics derived from httpRequests1mGroups, which Cloudflare finalises later than the adaptive datasets; 0 means the same as -analytics-lag")
 	analyticsTimestamps := flag.Bool("analytics-timestamps", false, "stamp analytics samples with the window start so each minute is stored once; needs a scrape interval of at most 1m")
 	queryLimit := flag.Int("query-limit", 10000, "max GraphQL result rows requested per zone, and per account for DNS analytics")
+	leaseName := flag.String("leader-election-lease", "", "name of the Kubernetes Lease for leader election; only the leader queries Cloudflare. Empty turns leader election off")
 	showVersion := flag.Bool("version", false, "print the exporter version and exit")
 	flag.Parse()
 
@@ -74,8 +77,17 @@ func run(logger *slog.Logger) error {
 		return err
 	}
 
+	var leader atomic.Bool
+	var elector *leaderelection.LeaderElector
+	if *leaseName != "" {
+		elector, err = newLeaderElector(*leaseName, &leader, logger)
+		if err != nil {
+			return err
+		}
+	}
+
 	cf := cloudflareapi.NewClient(cfg.APIToken)
-	coll := collector.New(cf, cfg.Discovery.Jobs, collector.Options{
+	opts := collector.Options{
 		Window:             *analyticsWindow,
 		Lag:                *analyticsLag,
 		QueryLimit:         *queryLimit,
@@ -85,7 +97,11 @@ func run(logger *slog.Logger) error {
 		AccountConcurrency: cfg.Server.AccountConcurrency,
 		RequestTimeout:     cfg.Server.RequestTimeout,
 		DNSRequestTimeout:  cfg.Server.DNSRequestTimeout,
-	}, logger)
+	}
+	if elector != nil {
+		opts.IsLeader = leader.Load
+	}
+	coll := collector.New(cf, cfg.Discovery.Jobs, opts, logger)
 
 	registry := prometheus.NewRegistry()
 	registry.MustRegister(coll)
@@ -110,6 +126,16 @@ func run(logger *slog.Logger) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
+	electionDone := make(chan struct{})
+	if elector != nil {
+		go func() {
+			defer close(electionDone)
+			runLeaderElection(ctx, elector)
+		}()
+	} else {
+		close(electionDone)
+	}
+
 	errCh := make(chan error, 1)
 	go func() {
 		logger.Info("starting cloudflare-prometheus-exporter", "address", cfg.Server.ListenAddress, "metrics_path", cfg.Server.MetricsPath, "jobs", len(cfg.Discovery.Jobs))
@@ -124,6 +150,8 @@ func run(logger *slog.Logger) error {
 		return nil
 	case <-ctx.Done():
 		logger.Info("shutdown signal received, draining connections")
+		// Release the lease first so another replica takes over quickly.
+		<-electionDone
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownGracePeriod)
 		defer cancel()
 		if err := server.Shutdown(shutdownCtx); err != nil {

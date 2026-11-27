@@ -27,3 +27,10 @@ The Helm chart `appVersion` is the default `image.tag`. It must match the tag. `
 3. Run `git tag vx.y.z && git push origin main vx.y.z`.
 
 Do not tag before step 1. Do not reuse a chart version. Unless the user explicitly asks otherwise, the user commits, tags, and pushes.
+
+## High availability
+- Only the leader calls the Cloudflare API. A standby replica never queries it.
+- A standby exports only `cloudflare_exporter_*` metrics. Do not export stale per-job state.
+- Do not tie the readiness probe to leadership. A rollout would stall.
+- Set the leader flag from the `OnStartedLeading` context. Do not use `OnStoppedLeading` or `IsLeader()`.
+- Render the chart objects for leader election only when `replicaCount` is greater than 1.

@@ -1485,3 +1485,59 @@ func TestCollector_TimestampsFollowEachDatasetsWindow(t *testing.T) {
 		t.Errorf("timestamps %d, %d are not minute-aligned", zone, host)
 	}
 }
+
+func TestCollector_StandbyMakesNoCloudflareCalls(t *testing.T) {
+	fc := newFake()
+	opts := testOptions()
+	opts.IsLeader = func() bool { return false }
+	c := New(fc, []config.DiscoveryJob{{Name: "all"}}, opts, newTestLogger())
+
+	families := gather(t, c)
+
+	if fc.listZonesCalls+fc.httpMetricsCalls+fc.wafMetricsCalls+fc.dnsMetricsCalls+fc.errorMetricsCalls != 0 {
+		t.Errorf("standby called Cloudflare: %+v", fc)
+	}
+	if v, ok := metricValue(families, "cloudflare_exporter_leader", map[string]string{}); !ok || v != 0 {
+		t.Errorf("exporter_leader = %v, %v; want 0", v, ok)
+	}
+	for _, mf := range families {
+		if strings.HasPrefix(mf.GetName(), "cloudflare_zone_") {
+			t.Errorf("standby exported %s", mf.GetName())
+		}
+	}
+}
+
+func TestCollector_FormerLeaderDropsJobSuccess(t *testing.T) {
+	leader := true
+	opts := testOptions()
+	opts.IsLeader = func() bool { return leader }
+	c := New(newFake(), []config.DiscoveryJob{{Name: "all"}}, opts, newTestLogger())
+
+	if !hasSeries(gather(t, c), "cloudflare_exporter_job_success", map[string]string{"job": "all"}) {
+		t.Fatal("leader did not export job_success")
+	}
+	leader = false
+	if findFamily(gather(t, c), "cloudflare_exporter_job_success") != nil {
+		t.Error("former leader still exports job_success")
+	}
+}
+
+func TestCollector_LeaderExportsData(t *testing.T) {
+	leading := func() bool { return true }
+	for name, isLeader := range map[string]func() bool{"nil": nil, "leader": leading} {
+		t.Run(name, func(t *testing.T) {
+			opts := testOptions()
+			opts.IsLeader = isLeader
+			c := New(newFake(), []config.DiscoveryJob{{Name: "all"}}, opts, newTestLogger())
+
+			families := gather(t, c)
+
+			if v, ok := metricValue(families, "cloudflare_exporter_leader", map[string]string{}); !ok || v != 1 {
+				t.Errorf("exporter_leader = %v, %v; want 1", v, ok)
+			}
+			if !hasSeries(families, "cloudflare_zone_requests", map[string]string{"zone": "prod.example.com"}) {
+				t.Error("leader did not export zone data")
+			}
+		})
+	}
+}

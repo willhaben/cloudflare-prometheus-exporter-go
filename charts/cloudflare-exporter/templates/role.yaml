@@ -1,0 +1,17 @@
+{{- if include "cloudflare-exporter.leaderElection" . }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "cloudflare-exporter.fullname" . }}
+  labels:
+    {{- include "cloudflare-exporter.labels" . | nindent 4 }}
+rules:
+  # The Lease does not exist yet on first start, so create cannot name it.
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["create"]
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    resourceNames: [{{ include "cloudflare-exporter.fullname" . | quote }}]
+    verbs: ["get", "update"]
+{{- end }}

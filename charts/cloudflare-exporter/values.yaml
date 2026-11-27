@@ -1,4 +1,6 @@
-replicaCount: 1
+# More than one replica turns on leader election and adds the Role,
+# RoleBinding and PodDisruptionBudget.
+replicaCount: 2
 
 image:
   repository: ghcr.io/willhaben/cloudflare-prometheus-exporter-go
@@ -11,7 +13,8 @@ serviceAccount:
   annotations: {}
   # Defaults to the chart's fullname when empty.
   name: ""
-  # This exporter only calls the Cloudflare API, never the Kubernetes API.
+  # Ignored when replicaCount > 1: leader election needs the token, so the pod
+  # always mounts it.
   automountServiceAccountToken: false
 
 # CLOUDFLARE_API_TOKEN source. Set exactly one:
@@ -105,6 +108,8 @@ securityContext:
 nodeSelector: {}
 tolerations: []
 affinity: {}
+# Empty with replicaCount > 1 renders a soft spread across nodes.
+topologySpreadConstraints: []
 
 podAnnotations: {}
 podLabels: {}

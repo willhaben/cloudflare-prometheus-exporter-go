@@ -55,6 +55,9 @@ type cloudflareClient interface {
 
 // Options tune how a Collector queries Cloudflare.
 type Options struct {
+	// IsLeader reports whether this replica may query Cloudflare. nil means
+	// always.
+	IsLeader func() bool
 	// Window is the trailing time range of analytics pulled per scrape.
 	Window time.Duration
 	// Lag shifts the window into the past to allow for Cloudflare's analytics
@@ -101,6 +104,7 @@ type Collector struct {
 	apiCallDuration *prometheus.HistogramVec
 
 	windowDesc   *prometheus.Desc
+	leaderDesc   *prometheus.Desc
 	zoneInfoDesc *prometheus.Desc
 	tagInfoDesc  *prometheus.Desc
 
@@ -183,6 +187,7 @@ func New(cf cloudflareClient, jobs []config.DiscoveryJob, opts Options, logger *
 		}, []string{"account_id", "api"}),
 
 		windowDesc:   desc("exporter_analytics_window_seconds", "Length of the analytics window each zone metric is summed over", nil),
+		leaderDesc:   desc("exporter_leader", "1 if this replica holds the leader lease or leader election is off, 0 otherwise", nil),
 		zoneInfoDesc: desc("zone_info", "Zone discovery info, value is always 1", withLabel(zoneLabels, "account_id", "account", "status")),
 		tagInfoDesc:  desc("zone_tags_info", "Cloudflare resource tags attached to the zone, value is always 1", withLabel(zoneLabels, "tag_key", "tag_value")),
 
@@ -248,7 +253,7 @@ func (c *Collector) Describe(ch chan<- *prometheus.Desc) {
 
 func (c *Collector) allDescs() []*prometheus.Desc {
 	return []*prometheus.Desc{
-		c.windowDesc, c.zoneInfoDesc, c.tagInfoDesc,
+		c.windowDesc, c.leaderDesc, c.zoneInfoDesc, c.tagInfoDesc,
 		c.requestsDesc, c.requestsCachedDesc, c.requestsSSLDesc, c.requestsContentTypeDesc,
 		c.requestsCountryDesc, c.requestsStatusDesc, c.requestsBrowserDesc, c.requestsIPClassDesc,
 		c.requestsSSLProtocolDesc, c.requestsHTTPVersionDesc, c.bandwidthDesc, c.bandwidthCachedDesc,
@@ -380,6 +385,20 @@ func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 		defer cancel()
 	}
 
+	ch <- prometheus.MustNewConstMetric(c.windowDesc, prometheus.GaugeValue, c.opts.Window.Seconds())
+	leader := c.opts.IsLeader == nil || c.opts.IsLeader()
+	leaderValue := 0.0
+	if leader {
+		leaderValue = 1
+	}
+	ch <- prometheus.MustNewConstMetric(c.leaderDesc, prometheus.GaugeValue, leaderValue)
+	defer c.collectSelf(ch)
+	if !leader {
+		// A former leader must not keep exporting its last job result.
+		c.jobSuccess.Reset()
+		return
+	}
+
 	now := time.Now()
 	zoneLag := cmp.Or(c.opts.ZoneLag, c.opts.Lag)
 	s := &scrape{
@@ -389,8 +408,6 @@ func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 		emitted:        make(map[string]bool),
 		dns:            make(map[string]*dnsAccountState),
 	}
-
-	ch <- prometheus.MustNewConstMetric(c.windowDesc, prometheus.GaugeValue, c.opts.Window.Seconds())
 
 	for _, job := range c.jobs {
 		if err := c.collectJob(ctx, ch, s, job); err != nil {
@@ -410,7 +427,10 @@ func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 		ch <- prometheus.MustNewConstMetric(c.dnsTruncatedDesc, prometheus.GaugeValue, truncated, accountID)
 		ch <- prometheus.MustNewConstMetric(c.dnsUnmatchedDesc, prometheus.GaugeValue, float64(len(st.unmatched)), accountID)
 	}
+}
 
+// collectSelf emits the exporter's own metrics, which standby replicas also export.
+func (c *Collector) collectSelf(ch chan<- prometheus.Metric) {
 	c.scrapeErrors.Collect(ch)
 	c.jobSuccess.Collect(ch)
 	c.apiErrors.Collect(ch)

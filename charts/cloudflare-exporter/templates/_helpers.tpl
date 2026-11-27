@@ -56,3 +56,10 @@ Name of the ServiceAccount to use, whichever serviceAccount.* mode is in use.
 {{- default "default" .Values.serviceAccount.name -}}
 {{- end -}}
 {{- end -}}
+
+{{/*
+Yields "true" when more than one replica runs, which turns on leader election.
+*/}}
+{{- define "cloudflare-exporter.leaderElection" -}}
+{{- if gt (int .Values.replicaCount) 1 -}}true{{- end -}}
+{{- end -}}

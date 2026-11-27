@@ -10,7 +10,13 @@ The exporter discovers accounts and zones through the Cloudflare REST API. It us
 
 The exporter filters the scraped zones with the [Resource Tagging API](https://developers.cloudflare.com/resource-tagging/). The `searchTags` job setting uses YACE-style rules. It supports AND logic, key-only matches, key=value matches, and negated matches. The exporter exposes the tags of each matched zone as Prometheus labels. The metric is `cloudflare_zone_tags_info`.
 
-The exporter stores no state. Every scrape queries Cloudflare directly. Replicas need no coordination, so you can run the exporter as a normal Kubernetes Deployment. Run exactly one replica for each configuration, as with any pull-based exporter.
+The exporter stores no state. Every scrape queries Cloudflare directly. You can run the exporter as a normal Kubernetes Deployment.
+
+## High availability
+
+You can run several replicas. Set `-leader-election-lease` to the name of a Kubernetes Lease. The replicas then use Lease leader election. Only the leader queries Cloudflare. Standby replicas export only the `cloudflare_exporter_*` metrics. The service account needs the RBAC verbs `get`, `create`, and `update` on `leases` in the API group `coordination.k8s.io`.
+
+A failover during a node drain takes a few seconds, plus up to one scrape interval. The client library gives no fencing. Two replicas can briefly export the same minute. Aggregate with `max without (pod, instance)`. Never `sum` across replicas. To alert on a missing or duplicate leader, use `sum(cloudflare_exporter_leader) != 1`.
 
 ## Configuration
 
@@ -63,6 +69,7 @@ Command-line flags. All flags are optional.
 | `-zone-analytics-lag` | `0` | Lag for the metrics that come from `httpRequests1mGroups`. These include requests, bandwidth, threats, page views, uniques, cache hit ratio, and their breakdowns. Cloudflare finalises this dataset later than the adaptive datasets. Other `cloudflare_zone_*` metrics use `-analytics-lag`. The value `0` means the same as `-analytics-lag` |
 | `-analytics-timestamps` | `false` | Stamp each sample with the start of its own dataset's window. Each minute is then stored once, however often it is scraped. A minute is not corrected after it is published. Use a scrape interval of at most `1m`. Instant queries see only series that are younger than the Prometheus 5m lookback. Keep `-analytics-lag` + `-analytics-window` under 5m for the series that you alert on. In one 6-minute local sample, the adaptive datasets were final at about 4m. `httpRequests1mGroups` took longer, for example with lag 4m and zone lag 8m. Cloudflare does not document a guarantee, so measure for your zones |
 | `-query-limit` | `10000` | Maximum number of GraphQL result rows requested per zone. For DNS analytics, the limit applies per account |
+| `-leader-election-lease` | (empty) | Name of the Kubernetes Lease for leader election. The lease is in the namespace of the pod. Only the leader queries Cloudflare. An empty value turns leader election off. The exporter then makes no Kubernetes API call |
 | `-version` | `false` | Print the exporter version and exit |
 
 ### Scrape interval and Cloudflare rate limits
@@ -125,13 +132,14 @@ Every zone metric has the labels `zone_id` and `zone`.
 | `cloudflare_zone_error_ratio` | `side` | 4xx and 5xx error ratio, by side. `edge` is the edge 4xx and 5xx responses divided by all requests. `origin` is the origin 4xx and 5xx responses divided by the requests that reached the origin. The `origin` side excludes edge cache hits, edge blocks, and all other requests that the origin never receives |
 | `cloudflare_zone_origin_response_duration_seconds` | | Average origin response duration. Requests that reached the origin are weighted by request count |
 | `cloudflare_zone_error_result_truncated` | (zone labels) | 1 if the error and latency analytics result for the zone reached `-query-limit` in this scrape |
-| `cloudflare_zone_low_confidence_rows` | `dataset` | The number of sampled rows in this scrape that have too few records for a steady extrapolation, for each Cloudflare dataset. On the datasets that this exporter scales, these rows are published unscaled. See [Sampling](#sampling) |
+| `cloudflare_zone_low_confidence_rows` | `dataset` | The number of sampled rows in this scrape with too few records for a steady extrapolation. The count is for each Cloudflare dataset. On the datasets that this exporter scales, these rows are published unscaled. See [Sampling](#sampling) |
 
 Exporter self-metrics:
 
 | Metric | Labels | Description |
 |--------|--------|-------------|
 | `cloudflare_exporter_analytics_window_seconds` | | Configured `-analytics-window` |
+| `cloudflare_exporter_leader` | | 1 if this replica holds the leader lease or leader election is off. Otherwise 0 |
 | `cloudflare_exporter_job_success` | `job` | 1 if the last scrape of the job succeeded. Otherwise 0 |
 | `cloudflare_exporter_scrape_errors_total` | `job` | Cumulative failed scrapes for each job |
 | `cloudflare_exporter_api_errors_total` | `account_id`, `api` | Failed calls to an optional API that needs its own permission (`dns_analytics`, `resource_tagging`). The failure does not stop the scrape |
